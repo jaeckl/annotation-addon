@@ -430,7 +430,7 @@ Inner-class scan and scripts without `class_name`. The default selector has no `
 Parked from the game side, not designed yet. Physics, tweens, navigation, and the animation player stay direct engine calls.
 
 - Spawning a `PackedScene` through the container, then injecting and parenting the instance.
-- The frame. A method on a component runs from one node the container owns, on `_process` or `_physics_process`, so a `RefCounted` service can tick.
+- The frame. A component that is not a `Node` marks a method with `@Process` or `@PhysicsProcess`. The method takes the delta. Driver nodes the container owns call it. An enum selects a call before or after scene nodes that keep the normal process priority, and an order int sorts marked methods inside that phase. A lower order runs first. A `Node` component keeps `_process` and `process_priority`.
 - An input-map action calling a component method.
 - A Godot signal on a node calling a component method or publishing an `Event`.
 - A pool of short-lived instances the container injects and hands out.
