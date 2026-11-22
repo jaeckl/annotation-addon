@@ -102,6 +102,10 @@ func _ready() -> void:
 	_check(lines, not _has_label(box, "DefaultJukebox") and not _has_label(box, "SpareReady") and not _has_label(box, "HalfComponents") and not _has_label(box, "GatedSpare") and not _has_label(box, "MissingTypeBanner") and not _has_label(box, "MissingTypeFallback"), "a present component skips the default, and a deferred component does not satisfy another condition")
 	_check(lines, box.resolve(JukeboxGate) != null and box.resolve(SpareFallback) != null and not _has_label(box, "ComponentFactory.spare_gate"), "a component condition gates the factory method")
 	_check(lines, box.configuration(ClosedComponentFactory) == null and not _has_label(box, "ClosedComponentFactory.ghost") and not _has_label(box, "HiddenComponentAudio") and box.resolve(JukeboxAudio) != null, "a failed component condition skips the configuration and the settings object")
+	_check(lines, box.resolve(ResourceBanner) != null and box.resolve(ConfigDirBanner) != null and box.resolve(BothResources) != null and box.resolve(PresentResourceAudio) != null, "a present res:// file or directory registers")
+	_check(lines, not _has_label(box, "MissingResourceBanner") and not _has_label(box, "MissingDirBanner") and not _has_label(box, "HalfResources") and not _has_label(box, "OutsideResourceBanner"), "a missing path skips the component, and a path outside res:// does not match")
+	_check(lines, box.resolve(ResourceGate) != null and not _has_label(box, "ResourceFactory.missing_gate"), "a resource path gates the factory method")
+	_check(lines, box.configuration(ClosedResourceFactory) == null and not _has_label(box, "ClosedResourceFactory.ghost") and not _has_label(box, "HiddenResourceAudio"), "a failed resource condition skips the configuration and the settings object")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):

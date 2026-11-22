@@ -1,0 +1,2 @@
+class_name ResourceGate
+extends RefCounted

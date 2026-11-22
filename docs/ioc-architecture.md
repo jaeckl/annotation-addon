@@ -185,7 +185,7 @@ sequenceDiagram
     Loop->>Box: install every ScopeHandler subclass
 ```
 
-`Condition` is the base. `@ConditionalOnProperty`, `@ConditionalOnFeature`, `@ConditionalOnClass`, `@ConditionalOnMissingClass`, `@ConditionalOnComponent`, and `@ConditionalOnMissingComponent` are the checks. `@ConditionalOnResource` and `@ConditionalOnNode` are later subclasses. The container does not special-case the subclass name. It asks each condition annotation on the target whether the definition may be registered. A condition that reads the registry is held until the other definitions exist.
+`Condition` is the base. `@ConditionalOnProperty`, `@ConditionalOnFeature`, `@ConditionalOnClass`, `@ConditionalOnMissingClass`, `@ConditionalOnComponent`, `@ConditionalOnMissingComponent`, and `@ConditionalOnResource` are the checks. `@ConditionalOnNode` is the later subclass. The container does not special-case the subclass name. It asks each condition annotation on the target whether the definition may be registered. A condition that reads the registry is held until the other definitions exist.
 
 `ComponentDefinition.type` is the component script, or the factory method's declared return type. `qualifiers` is every annotation on that class or method that extends `Qualifier`, each with its attributes. The container keeps a list of definitions. It does not key that list by exact script, because a request for a parent type must see every subclass.
 
@@ -411,8 +411,10 @@ The binder holds an ordered `PropertyConverter` list. The first converter whose 
 
 `@ConditionalOnComponent` matches when a registered product is the named global class or a subclass of it. `@ConditionalOnMissingComponent` matches when no such product is registered. Both wait until every definition that does not read the registry has been registered. The candidate does not count itself, and neither does another product that also reads the registry, so scan order cannot decide. A name that is not a global GDScript class is `push_error` and does not match. A failed earlier condition still skips the definition before that pass. A failed check on a `@Configuration` class skips its methods and its property scan.
 
-`@ConditionalOnResource` and `@ConditionalOnNode` stay later. `@ConditionalOnNode` waits until a scene root enters.
+`@ConditionalOnResource` matches when the `res://` file or directory exists. A cfg file counts, because the check is the path, not a loaded `Resource`. A missing path skips the definition. A path that does not start with `res://` is `push_error` and does not match. Several resource conditions on one target all have to match. A failed check on a `@Configuration` class skips its methods and its property scan.
+
+`@ConditionalOnNode` stays later. It waits until a scene root enters. Scene scope is still not here.
 
 ## Out of this plan
 
-Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. The other `@ConditionalOn*` checks stay later subclasses of `Condition`. None of them becomes a branch inside the container.
+Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. `@ConditionalOnNode` stays later, until a scene root enters. None of the condition checks becomes a branch inside the container.
