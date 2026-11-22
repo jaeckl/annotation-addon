@@ -1,0 +1,449 @@
+class_name Mapper
+extends RefCounted
+
+## Builds a document from @Serialize / @Transient and asks the codec for bytes.
+## Vector2, Vector3, Color, NodePath, and StringName are leaves. A cycle is a
+## push_error and write returns no bytes. A shared reference is written twice.
+
+var codec: Codec
+var _failed := false
+var _plans: Dictionary = {}
+var _plan_bad: Dictionary = {}
+var _class_mode_cache: Dictionary = {}
+var _mark_seen: Dictionary = {}
+var _mark_bad: Dictionary = {}
+var _plan_reported: Dictionary = {}
+var _empty_reported: Dictionary = {}
+var _scripts: Dictionary = {}
+
+
+func write(instance: Object) -> PackedByteArray:
+	_failed = false
+	if codec == null:
+		_error("Serialize: write needs a codec.")
+		return PackedByteArray()
+	if instance == null:
+		_error("Serialize: write needs an object.")
+		return PackedByteArray()
+	var document := _write_object(instance, {}, false)
+	if _failed or document.is_empty():
+		return PackedByteArray()
+	return codec.write(document)
+
+
+func read(expected: GDScript, bytes: PackedByteArray) -> Object:
+	_failed = false
+	if codec == null:
+		_error("Serialize: read needs a codec.")
+		return null
+	if expected == null:
+		_error("Serialize: read needs a class.")
+		return null
+	var document: Variant = codec.read(bytes)
+	if typeof(document) != TYPE_DICTIONARY or not (document as Dictionary).has("_type"):
+		if typeof(document) != TYPE_DICTIONARY or (document as Dictionary).is_empty():
+			return null
+		_error("Serialize: the bytes are not a document.")
+		return null
+	var instance := _read_object(document)
+	if _failed or instance == null:
+		return null
+	var actual := instance.get_script() as GDScript
+	if not _script_accepts(actual, expected):
+		_error("Serialize: %s is not a %s." % [_script_name(actual), _script_name(expected)])
+		return null
+	return instance
+
+
+func _write_object(instance: Object, stack: Dictionary, force_all: bool) -> Dictionary:
+	if instance == null or instance.get_script() == null:
+		_error("Serialize: %s has no script." % (instance.get_class() if instance != null else "null"))
+		return {}
+	var script := instance.get_script() as GDScript
+	if String(script.get_global_name()).is_empty():
+		_error("Serialize: %s needs a class_name." % _script_name(script))
+		return {}
+	var id := instance.get_instance_id()
+	if stack.has(id):
+		_error("Serialize: %s contains a cycle." % _script_name(script))
+		return {}
+	stack[id] = true
+	var plan := _plan(script, force_all)
+	if _failed or plan.is_empty():
+		stack.erase(id)
+		return {}
+	var fields: Array = plan["fields"]
+	if fields.is_empty():
+		var empty_key := script.get_instance_id()
+		if _empty_reported.has(empty_key):
+			_failed = true
+		else:
+			_empty_reported[empty_key] = true
+			_error("Serialize: %s is not a document." % _script_name(script))
+		stack.erase(id)
+		return {}
+	var nested_force := force_all or _class_mode(script)
+	var document := {"_type": String(script.get_global_name())}
+	for field in fields:
+		document[String(field["key"])] = _write_value(instance.get(String(field["name"])), stack, nested_force)
+		if _failed:
+			stack.erase(id)
+			return {}
+	stack.erase(id)
+	return document
+
+
+func _write_value(value: Variant, stack: Dictionary, force_all: bool) -> Variant:
+	if _failed:
+		return null
+	if value == null:
+		return null
+	match typeof(value):
+		TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING:
+			return value
+		TYPE_VECTOR2:
+			return {"_type": "Vector2", "x": value.x, "y": value.y}
+		TYPE_VECTOR3:
+			return {"_type": "Vector3", "x": value.x, "y": value.y, "z": value.z}
+		TYPE_COLOR:
+			return {"_type": "Color", "r": value.r, "g": value.g, "b": value.b, "a": value.a}
+		TYPE_NODE_PATH:
+			return {"_type": "NodePath", "path": String(value)}
+		TYPE_STRING_NAME:
+			return {"_type": "StringName", "name": String(value)}
+		TYPE_ARRAY:
+			var items: Array = []
+			for item in value:
+				items.append(_write_value(item, stack, force_all))
+				if _failed:
+					return null
+			return items
+		TYPE_DICTIONARY:
+			var mapped := {}
+			for key in value:
+				var key_type := typeof(key)
+				if key_type != TYPE_STRING and key_type != TYPE_STRING_NAME:
+					_error("Serialize: a dictionary key must be a string.")
+					return null
+				var key_text := String(key)
+				if key_text == "_type":
+					_error("Serialize: a dictionary key cannot be _type.")
+					return null
+				mapped[key_text] = _write_value(value[key], stack, force_all)
+				if _failed:
+					return null
+			return mapped
+		TYPE_OBJECT:
+			return _write_object(value, stack, force_all)
+		_:
+			_error("Serialize: %s is not a document value." % type_string(typeof(value)))
+			return null
+
+
+func _read_object(document: Dictionary) -> Object:
+	var type_name := String(document.get("_type", ""))
+	if _is_value_type(type_name):
+		_error("Serialize: %s is not a class." % type_name)
+		return null
+	var script := _script_by_name(type_name)
+	if script == null:
+		_error("Serialize: %s is not a class." % type_name)
+		return null
+	var instance: Object = script.new()
+	if instance == null:
+		_error("Serialize: %s could not be constructed." % type_name)
+		return null
+	var plan := _plan(script, true)
+	if _failed or plan.is_empty():
+		return null
+	var by_key := {}
+	for field in plan["fields"]:
+		by_key[String(field["key"])] = field
+	var transient: Dictionary = plan["transient"]
+	for key in document:
+		var key_text := String(key)
+		if key_text == "_type":
+			continue
+		if transient.has(key_text):
+			_error("Serialize: %s.%s is transient." % [type_name, key_text])
+			return null
+		if not by_key.has(key_text):
+			_error("Serialize: %s has no field %s." % [type_name, key_text])
+			return null
+		var decoded: Variant = _read_value(document[key])
+		if _failed:
+			return null
+		var coerced: Variant = _coerce(int(by_key[key_text]["type"]), decoded)
+		if _failed:
+			return null
+		instance.set(String(by_key[key_text]["name"]), coerced)
+	return instance
+
+
+func _read_value(value: Variant) -> Variant:
+	if _failed:
+		return null
+	if value == null:
+		return null
+	var kind := typeof(value)
+	if kind == TYPE_ARRAY:
+		var items: Array = []
+		for item in value:
+			items.append(_read_value(item))
+			if _failed:
+				return null
+		return items
+	if kind != TYPE_DICTIONARY:
+		return value
+	if not value.has("_type"):
+		var mapped := {}
+		for key in value:
+			mapped[key] = _read_value(value[key])
+			if _failed:
+				return null
+		return mapped
+	var type_name := String(value["_type"])
+	if type_name == "Vector2":
+		return Vector2(_number(value, "x"), _number(value, "y"))
+	if type_name == "Vector3":
+		return Vector3(_number(value, "x"), _number(value, "y"), _number(value, "z"))
+	if type_name == "Color":
+		return Color(_number(value, "r"), _number(value, "g"), _number(value, "b"), _number(value, "a"))
+	if type_name == "NodePath":
+		if not value.has("path") or typeof(value["path"]) != TYPE_STRING:
+			_error("Serialize: NodePath needs path.")
+			return NodePath()
+		return NodePath(String(value["path"]))
+	if type_name == "StringName":
+		if not value.has("name") or typeof(value["name"]) != TYPE_STRING:
+			_error("Serialize: StringName needs name.")
+			return StringName()
+		return StringName(String(value["name"]))
+	return _read_object(value)
+
+
+func _number(value: Dictionary, key: String) -> float:
+	if not value.has(key):
+		_error("Serialize: %s needs %s." % [String(value.get("_type", "")), key])
+		return 0.0
+	var number: Variant = value[key]
+	var kind := typeof(number)
+	if kind != TYPE_INT and kind != TYPE_FLOAT:
+		_error("Serialize: %s.%s is not a number." % [String(value.get("_type", "")), key])
+		return 0.0
+	return float(number)
+
+
+func _coerce(field_type: int, value: Variant) -> Variant:
+	if _failed:
+		return null
+	if value == null:
+		if field_type == TYPE_NIL or field_type == TYPE_OBJECT:
+			return null
+		_error("Serialize: null cannot fill %s." % type_string(field_type))
+		return null
+	var got := typeof(value)
+	if field_type == TYPE_NIL or field_type == got:
+		return value
+	if field_type == TYPE_FLOAT and got == TYPE_INT:
+		return float(value)
+	if field_type == TYPE_INT and got == TYPE_FLOAT and float(value) == float(int(value)):
+		return int(value)
+	_error("Serialize: expected %s and found %s." % [type_string(field_type), type_string(got)])
+	return null
+
+
+func _plan(script: GDScript, force_all: bool) -> Dictionary:
+	var cache_key := "%s:%s" % [script.get_instance_id(), force_all]
+	if _plans.has(cache_key):
+		return _plans[cache_key]
+	if _plan_bad.has(cache_key):
+		_failed = true
+		return {}
+	var fields: Array = []
+	var transient := {}
+	var seen_names := {}
+	var seen_keys := {}
+	var mode := force_all or _class_mode(script)
+	var current := script
+	var bad := false
+	while current != null and not bad:
+		_check_marks(current)
+		if _failed:
+			bad = true
+			break
+		for info in _own_properties(current):
+			var prop_name := String(info.get("name", ""))
+			if prop_name.is_empty() or seen_names.has(prop_name):
+				continue
+			seen_names[prop_name] = true
+			var marked: Variant = AnnotationUtils.get_annotation_initialized(current, Serialize, prop_name)
+			var has_mark := marked is Object
+			var is_transient := AnnotationUtils.has_annotation(current, Transient, prop_name)
+			if has_mark and is_transient:
+				_plan_error(current, "Serialize: %s.%s is @Serialize and @Transient." % [_script_name(current), prop_name])
+				bad = true
+				break
+			if prop_name == "_type":
+				_plan_error(current, "Serialize: %s._type cannot be a field." % _script_name(current))
+				bad = true
+				break
+			var key := prop_name
+			if has_mark:
+				var custom := String((marked as Object).get("value")).strip_edges()
+				if custom != "":
+					key = custom
+			if is_transient:
+				transient[key] = true
+				continue
+			if not mode and not has_mark:
+				continue
+			if key == "_type":
+				_plan_error(current, "Serialize: %s.%s cannot use the key _type." % [_script_name(current), prop_name])
+				bad = true
+				break
+			if seen_keys.has(key):
+				_plan_error(current, "Serialize: %s uses the key %s twice." % [_script_name(script), key])
+				bad = true
+				break
+			seen_keys[key] = true
+			fields.append({
+				"name": prop_name,
+				"key": key,
+				"type": int(info.get("type", TYPE_NIL)),
+			})
+		current = current.get_base_script()
+	if bad or _failed:
+		_plan_bad[cache_key] = true
+		return {}
+	var plan := {"fields": fields, "transient": transient}
+	_plans[cache_key] = plan
+	return plan
+
+
+func _own_properties(script: GDScript) -> Array:
+	var counts := {}
+	var infos: Array = []
+	for info in script.get_script_property_list():
+		if not _is_script_variable(info):
+			continue
+		var prop_name := String(info.get("name", ""))
+		counts[prop_name] = int(counts.get(prop_name, 0)) + 1
+		infos.append(info)
+	var base_counts := {}
+	var base := script.get_base_script()
+	if base != null:
+		for info in base.get_script_property_list():
+			if not _is_script_variable(info):
+				continue
+			var prop_name := String(info.get("name", ""))
+			base_counts[prop_name] = int(base_counts.get(prop_name, 0)) + 1
+	var own: Array = []
+	var emitted := {}
+	for info in infos:
+		var prop_name := String(info.get("name", ""))
+		if emitted.has(prop_name):
+			continue
+		if int(counts.get(prop_name, 0)) - int(base_counts.get(prop_name, 0)) <= 0:
+			continue
+		emitted[prop_name] = true
+		own.append(info)
+	return own
+
+
+func _is_script_variable(info: Dictionary) -> bool:
+	return (int(info.get("usage", 0)) & PROPERTY_USAGE_SCRIPT_VARIABLE) != 0
+
+
+func _class_mode(script: GDScript) -> bool:
+	if _class_mode_cache.has(script):
+		return bool(_class_mode_cache[script])
+	var current := script
+	var found := false
+	while current != null:
+		if AnnotationUtils.has_annotation(current, Serialize):
+			found = true
+			break
+		current = current.get_base_script()
+	_class_mode_cache[script] = found
+	return found
+
+
+func _check_marks(script: GDScript) -> void:
+	if _mark_seen.has(script):
+		if bool(_mark_bad.get(script, false)):
+			_failed = true
+		return
+	var failed_before := _failed
+	AnnotationUtils.for_each_annotation_initialized(Serialize, script, _on_serialize.bind(script))
+	AnnotationUtils.for_each_annotation_initialized(Transient, script, _on_transient.bind(script))
+	_mark_seen[script] = true
+	_mark_bad[script] = _failed and not failed_before
+
+
+func _on_serialize(annotation: Object, target: Object, script: GDScript) -> void:
+	if target is ScriptInfo:
+		if String(annotation.get("value")).strip_edges() != "":
+			_plan_error(script, "Serialize: a class mark on %s does not take a name." % _script_name(script))
+		return
+	if target is VariableInfo:
+		return
+	_plan_error(script, "Serialize: @Serialize on %s belongs on a class or a field." % _script_name(script))
+
+
+func _on_transient(_annotation: Object, target: Object, script: GDScript) -> void:
+	if target is VariableInfo:
+		return
+	_plan_error(script, "Serialize: @Transient on %s belongs on a field." % _script_name(script))
+
+
+func _plan_error(script: GDScript, message: String) -> void:
+	var key := script.get_instance_id()
+	_failed = true
+	if _plan_reported.has(key):
+		return
+	_plan_reported[key] = true
+	push_error(message)
+
+
+func _script_by_name(type_name: String) -> GDScript:
+	if _scripts.has(type_name):
+		return _scripts[type_name] as GDScript
+	for entry in ProjectSettings.get_global_class_list():
+		if String(entry.get("class", "")) != type_name:
+			continue
+		var loaded: Variant = load(String(entry.get("path", "")))
+		if loaded is GDScript:
+			_scripts[type_name] = loaded
+			return loaded
+		return null
+	return null
+
+
+func _script_accepts(actual: GDScript, expected: GDScript) -> bool:
+	var current := actual
+	while current != null:
+		if current == expected:
+			return true
+		current = current.get_base_script()
+	return false
+
+
+func _is_value_type(type_name: String) -> bool:
+	return type_name == "Vector2" or type_name == "Vector3" or type_name == "Color" or type_name == "NodePath" or type_name == "StringName"
+
+
+func _script_name(script: GDScript) -> String:
+	if script == null:
+		return "?"
+	var global_name := String(script.get_global_name())
+	if global_name.is_empty():
+		return script.resource_path.get_file()
+	return global_name
+
+
+func _error(message: String) -> void:
+	if _failed:
+		return
+	_failed = true
+	push_error(message)
