@@ -37,6 +37,10 @@ var _scene_listeners: Dictionary = {}
 var _publishing: Array = []
 var _async_inflight: Dictionary = {}
 var _async_jobs: Array = []
+var _advice: Array = []
+var _proxy_scripts: Dictionary = {}
+var _proxy_origin: Dictionary = {}
+var _advice_refused: Dictionary = {}
 
 
 func setup(tree: SceneTree) -> void:
@@ -62,6 +66,18 @@ func setup(tree: SceneTree) -> void:
 		tree.node_added.connect(_on_node_added)
 	if not tree.node_removed.is_connected(_on_node_removed):
 		tree.node_removed.connect(_on_node_removed)
+
+
+## Drops the scene-tree signals. A container left connected still injects
+## nodes that enter after another container is in use.
+func shutdown() -> void:
+	if _tree == null:
+		return
+	if _tree.node_added.is_connected(_on_node_added):
+		_tree.node_added.disconnect(_on_node_added)
+	if _tree.node_removed.is_connected(_on_node_removed):
+		_tree.node_removed.disconnect(_on_node_removed)
+	_tree = null
 
 
 func _install_converters() -> void:
@@ -139,6 +155,10 @@ func discover() -> void:
 	_property_seen.clear()
 	_applying_deferred = false
 	_applying_scene = false
+	_advice.clear()
+	_proxy_scripts.clear()
+	_proxy_origin.clear()
+	_advice_refused.clear()
 	for entry in ProjectSettings.get_global_class_list():
 		if String(entry.get("language", "")) != "GDScript":
 			continue
@@ -241,8 +261,10 @@ func _on_node_removed(node: Node) -> void:
 	var scene_id := node.get_instance_id()
 	if not _open_scenes.has(scene_id):
 		return
-	for definition in _scene_definitions.get(scene_id, []):
+	var leaving: Array = _scene_definitions.get(scene_id, [])
+	for definition in leaving:
 		_definition_scene.erase(definition)
+	_drop_advice(leaving)
 	_scene_definitions.erase(scene_id)
 	_scene_instances.erase(scene_id)
 	_scene_listeners.erase(scene_id)
@@ -441,7 +463,8 @@ func _listener_name(record: Dictionary) -> String:
 	var instance: Object = record.get("instance")
 	if instance == null:
 		return "?"
-	return _script_name(instance.get_script())
+	var script := instance.get_script() as GDScript
+	return _script_name(_proxy_origin.get(script, script))
 
 
 func _register_event_publisher() -> void:
@@ -457,7 +480,8 @@ func _register_event_publisher() -> void:
 
 func _remember(definition: ComponentDefinition, instance: Object) -> void:
 	var scene_id := int(_definition_scene.get(definition, 0))
-	_store_listeners(instance, scene_id, instance.get_script() != definition.type)
+	var live := instance.get_script() as GDScript
+	_store_listeners(instance, scene_id, not _same_product_script(live, definition.type))
 	if scene_id != 0:
 		var bucket: Dictionary = _scene_instances.get(scene_id, {})
 		bucket[definition] = instance
@@ -575,15 +599,17 @@ func _is_event(script: GDScript) -> bool:
 
 
 func _class_product(script: GDScript) -> ComponentDefinition:
+	var origin := _proxy_origin.get(script, script) as GDScript
 	for definition in definitions:
 		var product := definition as ComponentDefinition
-		if product != null and product.factory == null and product.type == script:
+		if product != null and product.factory == null and product.type == origin:
 			return product
 	return null
 
 
 func _scan(script: GDScript) -> void:
 	_reject_misplaced_async(script)
+	_reject_misplaced_advice(script)
 	if AnnotationUtils.has_annotation(script, Configuration):
 		_register_configuration(script)
 		return
@@ -744,6 +770,7 @@ func _register_class_product(script: GDScript) -> void:
 		return
 	_collect_listeners(script, true)
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
+	_record_advice(script)
 
 
 func _apply_deferred() -> void:
@@ -1002,7 +1029,9 @@ func _construct(definition: ComponentDefinition, from_node: Node) -> Object:
 	if definition.factory != null:
 		instance = definition.factory.callv(definition.method, args)
 	else:
-		instance = definition.owner_script.callv(&"new", args)
+		instance = _construct_woven(definition, args, from_node)
+		if instance == null:
+			return null
 	if instance == null or not (instance is Object):
 		push_error("IOC: %s produced null." % definition.label)
 		return null
@@ -1075,6 +1104,279 @@ func _describe_qualifiers(qualifiers: Array) -> String:
 	for annotation in qualifiers:
 		parts.append(matcher.describe(annotation))
 	return ", ".join(parts)
+
+
+func _construct_woven(definition: ComponentDefinition, args: Array, from_node: Node) -> Object:
+	var script := definition.owner_script
+	var chains: Dictionary = {}
+	if script != null and not AnnotationUtils.has_annotation(script, Aspect):
+		var advice_from: Node = from_node if int(_definition_scene.get(definition, 0)) != 0 else null
+		var bound: Variant = _bind_advice(script, advice_from)
+		if bound == null:
+			return null
+		chains = bound
+		if not chains.is_empty():
+			script = _proxy_for(definition.owner_script, chains)
+			if script == null:
+				return null
+	var pushed := false
+	if not chains.is_empty():
+		AopDispatch.push(script, chains)
+		pushed = true
+	var instance: Variant = script.callv(&"new", args)
+	if pushed:
+		AopDispatch.pop(script)
+	if instance == null or not (instance is Object):
+		push_error("IOC: %s produced null." % definition.label)
+		return null
+	if not chains.is_empty():
+		instance.set(&"__aop_chains", chains)
+	return instance
+
+
+func _bind_advice(type: GDScript, from_node: Node) -> Variant:
+	var visible := _visible_advice(from_node)
+	if visible.is_empty():
+		return {}
+	var methods := _declared_methods(type)
+	var chains := {}
+	for method_name in methods:
+		var declared: Dictionary = methods[method_name]
+		var info: Dictionary = declared["info"]
+		var declaring := declared["script"] as GDScript
+		var steps: Array = []
+		var refused := false
+		for record in visible:
+			var pointcut := record.get("pointcut") as GDScript
+			if not _exact_pointcut(declaring, pointcut, method_name):
+				continue
+			if not _advisable(declaring, method_name, info):
+				refused = true
+				break
+			var aspect := _instance_of(record["definition"], from_node)
+			if aspect == null:
+				return null
+			steps.append({
+				"kind": record["kind"],
+				"method": record["method"],
+				"aspect": aspect,
+			})
+		if refused or steps.is_empty():
+			continue
+		chains[method_name] = steps
+	return chains
+
+
+func _visible_advice(from_node: Node) -> Array:
+	var visible := _visible_definitions(from_node)
+	var found: Array = []
+	for record in _advice:
+		var definition := record.get("definition") as ComponentDefinition
+		if definition != null and visible.has(definition):
+			found.append(record)
+	return found
+
+
+func _declared_methods(script: GDScript) -> Dictionary:
+	# get_script_method_list includes base methods, so it cannot say which
+	# script declared one. ReflectionUtils lists each script's own methods
+	# and names that script. The first name is the most derived declaration.
+	var found := {}
+	for item in ReflectionUtils.get_function_list(script):
+		var function_info := item as FunctionInfo
+		if function_info == null:
+			continue
+		var method_name := StringName(function_info.name)
+		if method_name == &"" or found.has(method_name):
+			continue
+		var declaring := function_info.get_gdscript()
+		found[method_name] = {
+			"script": declaring,
+			"info": _method_dictionary(declaring, method_name),
+		}
+	return found
+
+
+func _method_dictionary(script: GDScript, method_name: StringName) -> Dictionary:
+	if script == null:
+		return {}
+	for info in script.get_script_method_list():
+		if StringName(String(info.get("name", ""))) == method_name:
+			return info
+	return {}
+
+
+func _exact_pointcut(script: GDScript, pointcut: GDScript, method_name: StringName) -> bool:
+	if script == null or pointcut == null:
+		return false
+	var entry: Variant = AnnotationUtils.get_annotation(script, pointcut, method_name)
+	if typeof(entry) != TYPE_DICTIONARY:
+		return false
+	return String(entry.get("name", "")) == String(pointcut.get_global_name())
+
+
+func _advisable(script: GDScript, method_name: StringName, info: Dictionary) -> bool:
+	var key := "%s.%s" % [_script_name(script), method_name]
+	if _advice_refused.has(key):
+		return false
+	var reason := ""
+	var flags := int(info.get("flags", 0))
+	var text := String(method_name)
+	if method_name == &"_init" or text.begins_with("@") or text.begins_with("__aop_"):
+		reason = "cannot be advised"
+	elif (flags & METHOD_FLAG_STATIC) != 0:
+		reason = "is static and cannot be advised"
+	elif (flags & METHOD_FLAG_VARARG) != 0:
+		reason = "has a rest argument and cannot be advised"
+	elif not AopProxy.defaults_ok(info):
+		reason = "defaults cannot be copied onto the proxy"
+	if reason.is_empty():
+		return true
+	_advice_refused[key] = true
+	push_error("IOC: %s %s." % [key, reason])
+	return false
+
+
+func _proxy_for(target: GDScript, chains: Dictionary) -> GDScript:
+	var names := PackedStringArray()
+	for method_name in chains:
+		names.append(String(method_name))
+	names.sort()
+	var key := "%s|%s" % [target.resource_path, "|".join(names)]
+	if _proxy_scripts.has(key):
+		return _proxy_scripts[key]
+	var methods: Array = []
+	var declared := _declared_methods(target)
+	for method_name in chains:
+		methods.append(declared[method_name]["info"])
+	var proxy := AopProxy.build(target, methods)
+	if proxy == null:
+		push_error("IOC: proxy for %s failed to compile." % _script_name(target))
+		return null
+	_proxy_scripts[key] = proxy
+	_proxy_origin[proxy] = target
+	return proxy
+
+
+func _same_product_script(live: GDScript, type: GDScript) -> bool:
+	if live == null or type == null:
+		return false
+	if live == type:
+		return true
+	return _proxy_origin.get(live, null) == type
+
+
+func _drop_advice(leaving: Array) -> void:
+	if leaving.is_empty():
+		return
+	var kept: Array = []
+	for record in _advice:
+		if leaving.has(record.get("definition")):
+			continue
+		kept.append(record)
+	_advice = kept
+
+
+func _reject_misplaced_advice(script: GDScript) -> void:
+	var aspect := AnnotationUtils.has_annotation(script, Aspect)
+	var component := AnnotationUtils.has_annotation(script, Component)
+	if aspect and not component:
+		push_error("IOC: %s is @Aspect without @Component." % _script_name(script))
+	if aspect and AnnotationUtils.has_annotation(script, Configuration):
+		push_error("IOC: %s is @Aspect on a configuration." % _script_name(script))
+	_reject_advice_kind(script, Before, "Before", "JoinPoint", aspect)
+	_reject_advice_kind(script, After, "After", "JoinPoint", aspect)
+	_reject_advice_kind(script, Around, "Around", "ProceedingJoinPoint", aspect)
+
+
+func _reject_advice_kind(script: GDScript, kind: GDScript, label: String, expected_name: String, aspect: bool) -> void:
+	var bucket := {
+		"script": script,
+		"label": label,
+		"expected": expected_name,
+		"aspect": aspect,
+	}
+	AnnotationUtils.for_each_annotation_initialized(kind, script, _take_advice_placement.bind(bucket))
+
+
+func _take_advice_placement(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	var label := String(bucket["label"])
+	if not (target is FunctionInfo):
+		push_error("IOC: @%s on %s belongs on a method." % [label, _script_name(script)])
+		return
+	var info := target as FunctionInfo
+	if not bool(bucket["aspect"]):
+		push_error("IOC: %s.%s is @%s without @Aspect." % [_script_name(script), info.name, label])
+		return
+	if info.is_static:
+		push_error("IOC: %s.%s is static and cannot advise." % [_script_name(script), info.name])
+		return
+	if not _advice_signature_ok(script, info.name, String(bucket["expected"])):
+		push_error("IOC: %s.%s must take one %s." % [_script_name(script), info.name, bucket["expected"]])
+		return
+	if not _pointcut_ok(annotation.get("pointcut")):
+		push_error("IOC: %s.%s pointcut must be an annotation." % [_script_name(script), info.name])
+
+
+func _record_advice(script: GDScript) -> void:
+	if not AnnotationUtils.has_annotation(script, Aspect):
+		return
+	var definition := _newest_definition()
+	for item in ReflectionUtils.get_function_list(script):
+		var function_info := item as FunctionInfo
+		if function_info == null or function_info.get_gdscript() != script or function_info.is_static:
+			continue
+		var method_name := StringName(function_info.name)
+		_record_kind(script, definition, method_name, Before, "before", "JoinPoint")
+		_record_kind(script, definition, method_name, After, "after", "JoinPoint")
+		_record_kind(script, definition, method_name, Around, "around", "ProceedingJoinPoint")
+
+
+func _record_kind(script: GDScript, definition: ComponentDefinition, method_name: StringName, kind: GDScript, kind_name: String, expected_name: String) -> void:
+	var entry: Variant = AnnotationUtils.get_annotation(script, kind, method_name)
+	if typeof(entry) != TYPE_DICTIONARY:
+		return
+	if not _advice_signature_ok(script, method_name, expected_name):
+		return
+	var annotation: Object = AnnotationUtils.instantiate_annotation(entry)
+	if annotation == null or not _pointcut_ok(annotation.get("pointcut")):
+		return
+	_advice.append({
+		"definition": definition,
+		"kind": kind_name,
+		"method": method_name,
+		"pointcut": annotation.get("pointcut"),
+	})
+
+
+func _advice_signature_ok(script: GDScript, method_name: StringName, expected_name: String) -> bool:
+	var args := _method_args(script, method_name)
+	if args.size() != 1:
+		return false
+	return _parameter_accepts(args[0], _scripts.get(expected_name) as GDScript)
+
+
+func _parameter_accepts(argument: Dictionary, expected: GDScript) -> bool:
+	var type_code := int(argument.get("type", TYPE_NIL))
+	if type_code == TYPE_NIL:
+		return true
+	if type_code != TYPE_OBJECT:
+		return false
+	var type_name := String(argument.get("class_name", ""))
+	if type_name.is_empty() or type_name == "Object":
+		return true
+	var arg_script := _scripts.get(type_name) as GDScript
+	if arg_script == null or expected == null:
+		return false
+	return arg_script == expected or _extends_script(expected, arg_script)
+
+
+func _pointcut_ok(pointcut: Variant) -> bool:
+	var script := pointcut as GDScript
+	if script == null:
+		return false
+	return script.get_instance_base_type() == &"GDScriptAnnotation"
 
 
 func _script_name(script: GDScript) -> String:
