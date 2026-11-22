@@ -20,3 +20,5 @@ extends RefCounted
 @Inject var bosses: Array[Enemy]
 @Qualifier("nobody")
 @Inject var nobody: Array[Enemy]
+@Inject var audio: AudioSettings
+@Inject var combat_options: CombatOptions

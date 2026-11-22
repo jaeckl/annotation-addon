@@ -71,6 +71,10 @@ func _ready() -> void:
 	_check(lines, settings.get_value("audio/music") == "town", "earlier cfg file supplies audio/music")
 	_check(lines, settings.get_value("combat/enabled") == true and settings.get_value("combat/title") == "local", "later cfg file supplies its own keys")
 	_check(lines, not settings.contains("audio/missing"), "absent key is missing")
+	_check(lines, party.audio != null and party.audio == box.resolve(AudioSettings) and is_equal_approx(party.audio.master, 0.8) and party.audio.music == "town" and party.audio.channels == 2 and party.audio.subtitle == "none" and party.audio.leaked == "keep", "@ConfigurationProperties binds exported fields")
+	_check(lines, party.combat_options != null and party.combat_options.enabled and party.combat_options.title == "local", "RefCounted settings bind from combat/*")
+	_check(lines, not _has_label(box, "BadAudio"), "type mismatch is not published")
+	_check(lines, not _has_label(box, "IgnoredSettings"), "settings outside the scan root are not registered")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):

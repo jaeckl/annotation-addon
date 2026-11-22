@@ -395,7 +395,9 @@ A `PropertySource` is one named origin. `contains(key)` is how a missing key dif
 
 This slice loads `res://config/*.cfg` through `ConfigFile`. Each entry is `section/key`. File names sort ascending, and each file is inserted at index 0, so the last name wins. A key only the earlier file has still comes from that file. A missing directory loads nothing. A file that fails to parse is skipped after `push_error`.
 
-`@ConfigurationProperties`, ProjectSettings, OS environment, command-line args, and `.tres` sources are the following slices. `@ConditionalOnProperty` comes after those and calls `environment.get_value` during registration.
+`@ConfigurationProperties(prefix="audio")` marks a `Resource` or `RefCounted`. It registers nothing by itself. `@ConfigurationPropertiesScan(root="res://samples/ioc")` on a `@Configuration` class opts in. A script path matches when it equals the root or sits under `root/`. At the end of discover the binder constructs each match, writes `@export` fields, and stores the instance in app scope. A normal `@Component` stays lazy. Fields are `int`, `float`, `bool`, and `String`. The key is `prefix/field`. A missing key keeps the field default. An `int` may fill a `float`. Any other mismatch is a `push_error` and that product is not published. A key with no `@export` field is ignored. A field that is not `@export` is left alone. Gameplay receives the object with `@Inject`.
+
+ProjectSettings, OS environment, command-line args, and `.tres` sources are the following slices. `@ConditionalOnProperty` comes after those and calls `environment.get_value` during registration.
 
 ## Out of this plan
 

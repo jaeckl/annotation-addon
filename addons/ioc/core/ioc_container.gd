@@ -9,7 +9,9 @@ var matcher: QualifierMatcher
 var selector: CandidateSelector
 var app_scope: AppScope
 var environment: PropertyEnvironment
+var binder: PropertyBinder
 var parsers: Array = []
+var _property_roots: Array = []
 var _scripts: Dictionary = {}
 var _factories: Dictionary = {}
 var _creating: Array = []
@@ -25,6 +27,7 @@ func setup(tree: SceneTree) -> void:
 	app_scope = AppScope.new()
 	app_scope.setup(tree)
 	environment = PropertyEnvironment.new()
+	binder = PropertyBinder.new()
 	parsers = [ConfigFilePropertySourceParser.new()]
 	_load_config_directory("res://config")
 	if not tree.node_added.is_connected(_on_node_added):
@@ -68,6 +71,7 @@ func _parser_for(path: String) -> PropertySourceParser:
 
 func discover() -> void:
 	_scripts.clear()
+	_property_roots.clear()
 	for entry in ProjectSettings.get_global_class_list():
 		if String(entry.get("language", "")) != "GDScript":
 			continue
@@ -77,6 +81,7 @@ func discover() -> void:
 		_scripts[String(entry.get("class", ""))] = script
 	for global_name in _scripts:
 		_scan(_scripts[global_name])
+	_bind_scanned_properties()
 
 
 func configuration(script: GDScript) -> Object:
@@ -179,8 +184,91 @@ func _register_configuration(script: GDScript) -> void:
 		push_error("IOC: configuration %s produced null." % _script_name(script))
 		return
 	_factories[script] = factory
+	_collect_property_roots(script)
 	var bucket := {"script": script, "factory": factory}
 	AnnotationUtils.for_each_annotation_initialized(Component, script, _take_configuration_component.bind(bucket))
+
+
+func _collect_property_roots(script: GDScript) -> void:
+	var bucket := {"script": script}
+	AnnotationUtils.for_each_annotation_initialized(ConfigurationPropertiesScan, script, _take_property_root.bind(bucket))
+
+
+func _take_property_root(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if not (target is ScriptInfo):
+		push_error("IOC: @ConfigurationPropertiesScan on %s belongs on the class." % _script_name(script))
+		return
+	var root := String(annotation.get("root")).strip_edges().trim_suffix("/")
+	if root.is_empty():
+		push_error("IOC: %s scan needs a root." % _script_name(script))
+		return
+	_property_roots.append(root)
+
+
+func _bind_scanned_properties() -> void:
+	if _property_roots.is_empty():
+		return
+	for global_name in _scripts:
+		var script := _scripts[global_name] as GDScript
+		if script == null or not AnnotationUtils.has_annotation(script, ConfigurationProperties):
+			continue
+		if not _under_property_root(script):
+			continue
+		_register_property_product(script)
+
+
+func _under_property_root(script: GDScript) -> bool:
+	var path := script.resource_path
+	for root in _property_roots:
+		var prefix := String(root)
+		if path == prefix or path.begins_with(prefix + "/"):
+			return true
+	return false
+
+
+func _register_property_product(script: GDScript) -> void:
+	if _class_product(script) != null:
+		push_error("IOC: %s is @Component and @ConfigurationProperties." % _script_name(script))
+		return
+	if not script.can_instantiate():
+		push_error("IOC: %s properties cannot be constructed." % _script_name(script))
+		return
+	var prefix := _property_prefix(script)
+	if prefix.is_empty():
+		return
+	var instance: Object = script.callv(&"new", [])
+	if instance == null:
+		push_error("IOC: %s properties produced null." % _script_name(script))
+		return
+	if not binder.bind(instance, prefix, environment):
+		return
+	_add_definition(script, [], _script_name(script), script, null, &"", [], [])
+	var definition := definitions[definitions.size() - 1] as ComponentDefinition
+	app_scope.store(definition, instance)
+	app_scope.attach(instance)
+
+
+func _property_prefix(script: GDScript) -> String:
+	var bucket := {"script": script, "prefix": "", "found": false, "bad": false}
+	AnnotationUtils.for_each_annotation_initialized(ConfigurationProperties, script, _take_property_prefix.bind(bucket))
+	if bucket["bad"] or not bucket["found"]:
+		return ""
+	var prefix := String(bucket["prefix"]).strip_edges().trim_suffix("/")
+	if prefix.is_empty():
+		push_error("IOC: %s needs a property prefix." % _script_name(script))
+		return ""
+	return prefix
+
+
+func _take_property_prefix(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if not (target is ScriptInfo):
+		push_error("IOC: @ConfigurationProperties on %s belongs on the class." % _script_name(script))
+		bucket["bad"] = true
+		return
+	bucket["prefix"] = String(annotation.get("prefix"))
+	bucket["found"] = true
 
 
 func _take_configuration_component(annotation: Object, target: Object, bucket: Dictionary) -> void:
