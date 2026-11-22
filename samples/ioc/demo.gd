@@ -110,6 +110,16 @@ func _ready() -> void:
 	_check(lines, not _has_label(box, "SilentBanner") and not _has_label(box, "DeferredSpareBanner"), "a custom condition skips when the environment or the product list does not match")
 	_check(lines, box.resolve(ListedBanner) != null, "a condition list runs every listed class")
 	_check(lines, not _has_label(box, "SilentListedBanner") and not _has_label(box, "DeferredListedBanner") and not _has_label(box, "BadListedBanner"), "a condition list skips when one class misses or is not a Condition")
+	_check(lines, camp != null and box.resolve(NodeHudBanner, [], self) != null and box.resolve(NodeHudBanner, [], camp) == null and not _has_label(box, "NodeHudBanner"), "a Hud in this scene registers the component here only")
+	_check(lines, box.resolve(NodeMissingHudBanner, [], self) == null and box.resolve(NodeMissingHudBanner, [], camp) != null, "a scene without Hud registers the missing-node component")
+	var demo_fallback := box.resolve(NodeAbsentFallback, [], self)
+	var camp_fallback := box.resolve(NodeAbsentFallback, [], camp)
+	_check(lines, demo_fallback != null and camp_fallback != null and demo_fallback != camp_fallback, "each scene root gets its own node-condition product")
+	_check(lines, box.resolve(NodeBothBanner, [], self) != null and box.resolve(NodeBothBanner, [], camp) == null, "node conditions on one target all have to match")
+	_check(lines, box.resolve(NodeAbsentBanner, [], self) == null and box.resolve(NodeAbsentBanner, [], camp) == null and not _has_label(box, "BadNodeBanner"), "a node missing from the scene skips the component")
+	_check(lines, box.resolve(NodeGate, [], self) != null and box.resolve(MissingNodeGate, [], self) == null and box.resolve(NodeGate, [], camp) == null and box.resolve(MissingNodeGate, [], camp) != null, "a node condition gates the factory method")
+	_check(lines, box.configuration(HudSceneFactory) != null and box.resolve(NodeFactoryMark, [], self) != null and box.resolve(NodeFactoryMark, [], camp) == null, "a configuration node condition runs only for the matching scene")
+	_check(lines, box.configuration(ClosedNodeFactory) == null and box.resolve(NodeGhost, [], self) == null and box.resolve(NodeGhost, [], camp) == null and box.resolve(PresentNodeAudio, [], self) != null and box.resolve(PresentNodeAudio, [], camp) == null and box.resolve(HiddenNodeAudio, [], self) == null, "a failed node condition skips the configuration and the settings object")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):

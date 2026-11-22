@@ -3,7 +3,8 @@ extends RefCounted
 
 ## App-scope container. Discovers global classes, resolves products, and fills
 ## @Inject on nodes a scene already created when those nodes enter the tree.
-## Scene scope is not here.
+## A product gated by a node condition is kept on the scene root that admitted
+## it, and leaves with that root.
 var definitions: Array = []
 var matcher: QualifierMatcher
 var selector: CandidateSelector
@@ -22,6 +23,15 @@ var _deferred: Array = []
 var _registry_products: Array = []
 var _applying_deferred := false
 var _property_seen: Dictionary = {}
+var _scene_pending: Array = []
+var _scene_definitions: Dictionary = {}
+var _scene_instances: Dictionary = {}
+var _definition_scene: Dictionary = {}
+var _open_scenes: Dictionary = {}
+var _applying_scene := false
+var _active_scene_id := 0
+var _active_scene_root: Node
+var _scene_bucket: Array = []
 
 
 func setup(tree: SceneTree) -> void:
@@ -45,6 +55,8 @@ func setup(tree: SceneTree) -> void:
 	environment.add_first(CommandLinePropertySource.new())
 	if not tree.node_added.is_connected(_on_node_added):
 		tree.node_added.connect(_on_node_added)
+	if not tree.node_removed.is_connected(_on_node_removed):
+		tree.node_removed.connect(_on_node_removed)
 
 
 func _install_converters() -> void:
@@ -118,8 +130,10 @@ func discover() -> void:
 	_scripts.clear()
 	_property_roots.clear()
 	_deferred.clear()
+	_scene_pending.clear()
 	_property_seen.clear()
 	_applying_deferred = false
+	_applying_scene = false
 	for entry in ProjectSettings.get_global_class_list():
 		if String(entry.get("language", "")) != "GDScript":
 			continue
@@ -131,6 +145,7 @@ func discover() -> void:
 		_scan(_scripts[global_name])
 	_bind_scanned_properties()
 	_apply_deferred()
+	_open_existing_scenes()
 
 
 func configuration(script: GDScript) -> Object:
@@ -141,7 +156,7 @@ func resolve(type: GDScript, qualifiers: Array = [], from_node: Node = null) -> 
 	if type == null:
 		push_error("IOC: resolve needs a script.")
 		return null
-	var found: Array = selector.select(definitions, type, qualifiers)
+	var found: Array = selector.select(_visible_definitions(from_node), type, qualifiers)
 	if found.size() != 1:
 		_report_selection(type, qualifiers, found)
 		return null
@@ -152,16 +167,24 @@ func _instance_of(definition: ComponentDefinition, from_node: Node = null) -> Ob
 	if definition in _creating:
 		push_error("IOC: cycle while creating %s." % definition.label)
 		return null
-	var existing := app_scope.fetch(definition)
-	if existing != null:
-		return existing
+	var scene_id := int(_definition_scene.get(definition, 0))
+	if scene_id != 0:
+		var bucket: Dictionary = _scene_instances.get(scene_id, {})
+		var cached: Object = bucket.get(definition, null)
+		if cached != null:
+			return cached
+		if from_node == null:
+			from_node = _open_scenes.get(scene_id) as Node
+	else:
+		var existing := app_scope.fetch(definition)
+		if existing != null:
+			return existing
 	_creating.append(definition)
 	var instance := _construct(definition, from_node)
 	if instance != null and not _inject_fields(instance, definition, from_node):
 		instance = null
 	if instance != null:
-		app_scope.store(definition, instance)
-		app_scope.attach(instance)
+		_remember(definition, instance)
 	_creating.erase(definition)
 	return instance
 
@@ -173,7 +196,7 @@ func _resolve_dependency(dependency: Dictionary, from_node: Node) -> Variant:
 
 
 func _resolve_all(type: GDScript, qualifiers: Array, from_node: Node) -> Array:
-	var found: Array = selector.select(definitions, type, qualifiers)
+	var found: Array = selector.select(_visible_definitions(from_node), type, qualifiers)
 	var result: Array = []
 	for definition in found:
 		var instance := _instance_of(definition, from_node)
@@ -191,6 +214,8 @@ func _typed_array(element: GDScript, values: Array) -> Array:
 
 
 func _on_node_added(node: Node) -> void:
+	if String(node.scene_file_path) != "":
+		_open_scene(node)
 	var script := node.get_script() as GDScript
 	if script == null:
 		return
@@ -204,6 +229,117 @@ func _on_node_added(node: Node) -> void:
 	if fields == null or fields.is_empty():
 		return
 	_inject_field_list(node, fields, "%s scene" % node.name, node)
+
+
+func _on_node_removed(node: Node) -> void:
+	var scene_id := node.get_instance_id()
+	if not _open_scenes.has(scene_id):
+		return
+	for definition in _scene_definitions.get(scene_id, []):
+		_definition_scene.erase(definition)
+	_scene_definitions.erase(scene_id)
+	_scene_instances.erase(scene_id)
+	_open_scenes.erase(scene_id)
+
+
+func _open_existing_scenes() -> void:
+	if _tree == null or _tree.root == null:
+		return
+	_open_existing(_tree.root)
+
+
+func _open_existing(node: Node) -> void:
+	if String(node.scene_file_path) != "":
+		_open_scene(node)
+	for child in node.get_children():
+		_open_existing(child)
+
+
+func _open_scene(root: Node) -> void:
+	if root == null:
+		return
+	var scene_id := root.get_instance_id()
+	if _open_scenes.has(scene_id):
+		return
+	var bucket: Array = []
+	_open_scenes[scene_id] = root
+	_scene_definitions[scene_id] = bucket
+	_scene_instances[scene_id] = {}
+	_active_scene_id = scene_id
+	_active_scene_root = root
+	_scene_bucket = bucket
+	_registry_products = definitions.duplicate()
+	_applying_scene = true
+	for item in _scene_pending:
+		var script := item.get("script") as GDScript
+		if script == null:
+			continue
+		match String(item.get("kind", "")):
+			"class":
+				_register_class_product(script)
+			"method":
+				if _gate(script, "func", item["method"]) != "ready":
+					continue
+				_register_method(script, item["factory"], item["method"])
+			"configuration":
+				_register_configuration(script)
+			"property":
+				_register_property_product(script)
+	_applying_scene = false
+	_active_scene_root = null
+	_active_scene_id = 0
+	_scene_bucket = []
+	_registry_products = []
+
+
+func _visible_definitions(from_node: Node) -> Array:
+	var merged: Array = definitions.duplicate()
+	var root := _scene_root_of(from_node)
+	if root == null:
+		return merged
+	merged.append_array(_scene_definitions.get(root.get_instance_id(), []))
+	return merged
+
+
+func _scene_root_of(node: Node) -> Node:
+	if node == null and _tree != null:
+		node = _tree.current_scene
+	var current := node
+	while current != null:
+		if String(current.scene_file_path) != "":
+			return current
+		current = current.get_parent()
+	return null
+
+
+func _newest_definition() -> ComponentDefinition:
+	if _applying_scene:
+		return _scene_bucket[_scene_bucket.size() - 1]
+	return definitions[definitions.size() - 1]
+
+
+func _remember(definition: ComponentDefinition, instance: Object) -> void:
+	var scene_id := int(_definition_scene.get(definition, 0))
+	if scene_id != 0:
+		var bucket: Dictionary = _scene_instances.get(scene_id, {})
+		bucket[definition] = instance
+		_scene_instances[scene_id] = bucket
+		_attach_scene(scene_id, instance)
+		return
+	app_scope.store(definition, instance)
+	app_scope.attach(instance)
+
+
+func _attach_scene(scene_id: int, instance: Object) -> void:
+	if not (instance is Node):
+		return
+	var root := _open_scenes.get(scene_id) as Node
+	if root == null or not is_instance_valid(root):
+		return
+	var node := instance as Node
+	if node.get_parent() != null:
+		return
+	root.add_child.call_deferred(node)
 
 
 func _class_product(script: GDScript) -> ComponentDefinition:
@@ -226,10 +362,7 @@ func _scan(script: GDScript) -> void:
 
 func _register_configuration(script: GDScript) -> void:
 	var decision := _gate(script, "script")
-	if decision == "skip":
-		return
-	if decision == "defer":
-		_deferred.append({"kind": "configuration", "script": script})
+	if _postpone(decision, {"kind": "configuration", "script": script}):
 		return
 	if not script.can_instantiate():
 		push_error("IOC: configuration %s cannot be constructed." % _script_name(script))
@@ -287,10 +420,7 @@ func _under_property_root(script: GDScript) -> bool:
 
 func _register_property_product(script: GDScript) -> void:
 	var decision := _gate(script, "script")
-	if decision == "skip":
-		return
-	if decision == "defer":
-		_deferred.append({"kind": "property", "script": script})
+	if _postpone(decision, {"kind": "property", "script": script}):
 		return
 	if _class_product(script) != null:
 		push_error("IOC: %s is @Component and @ConfigurationProperties." % _script_name(script))
@@ -308,9 +438,7 @@ func _register_property_product(script: GDScript) -> void:
 	if not binder.bind(instance, prefix, environment):
 		return
 	_add_definition(script, [], _script_name(script), script, null, &"", [], [])
-	var definition := definitions[definitions.size() - 1] as ComponentDefinition
-	app_scope.store(definition, instance)
-	app_scope.attach(instance)
+	_remember(_newest_definition(), instance)
 
 
 func _property_prefix(script: GDScript) -> String:
@@ -345,10 +473,7 @@ func _take_configuration_component(annotation: Object, target: Object, bucket: D
 			push_error("IOC: %s.%s is static. Factory methods are called on the configuration instance." % [_script_name(script), info.name])
 			return
 		var decision := _gate(script, "func", info.name)
-		if decision == "skip":
-			return
-		if decision == "defer":
-			_deferred.append({"kind": "method", "script": script, "factory": bucket["factory"], "method": info.name})
+		if _postpone(decision, {"kind": "method", "script": script, "factory": bucket["factory"], "method": info.name}):
 			return
 		_register_method(script, bucket["factory"], info.name)
 		return
@@ -371,10 +496,7 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 
 func _register_class_product(script: GDScript) -> void:
 	var decision := _gate(script, "script")
-	if decision == "skip":
-		return
-	if decision == "defer":
-		_deferred.append({"kind": "class", "script": script})
+	if _postpone(decision, {"kind": "class", "script": script}):
 		return
 	if not script.can_instantiate():
 		push_error("IOC: component %s cannot be constructed." % _script_name(script))
@@ -420,31 +542,52 @@ func _apply_deferred() -> void:
 func _gate(script: GDScript, kind: String, member: StringName = &"") -> String:
 	var found := _conditions(script, kind, member)
 	var reads_registry := false
+	var reads_scene := false
 	var context := _condition_context()
 	for annotation in found:
 		var condition := annotation as Condition
 		if condition == null:
 			return "skip"
+		if condition.depends_on_scene():
+			reads_scene = true
+			continue
 		if condition.depends_on_registry():
 			reads_registry = true
 			continue
 		if not condition.matches(context):
 			return "skip"
-	if reads_registry and not _applying_deferred:
+	if reads_scene and not _applying_scene:
+		return "scene"
+	if reads_registry and not _applying_deferred and not _applying_scene:
 		return "defer"
-	if reads_registry:
+	if reads_registry or reads_scene:
 		for annotation in found:
 			var condition := annotation as Condition
-			if condition == null or not condition.depends_on_registry():
+			if condition == null:
+				return "skip"
+			if not condition.depends_on_registry() and not condition.depends_on_scene():
 				continue
 			if not condition.matches(context):
 				return "skip"
 	return "ready"
 
 
+func _postpone(decision: String, item: Dictionary) -> bool:
+	if decision == "defer":
+		_deferred.append(item)
+		return true
+	if decision == "scene":
+		_scene_pending.append(item)
+		return true
+	return decision == "skip"
+
+
 func _condition_context() -> ConditionContext:
-	var visible: Array = _registry_products if _applying_deferred else definitions
-	return ConditionContext.new(environment, visible)
+	var visible: Array = definitions
+	if _applying_deferred or _applying_scene:
+		visible = _registry_products
+	var root: Node = _active_scene_root if _applying_scene else null
+	return ConditionContext.new(environment, visible, root)
 
 
 func _conditions(script: GDScript, kind: String, member: StringName) -> Array:
@@ -480,7 +623,11 @@ func _add_definition(type: GDScript, qualifiers: Array, label: String, owner_scr
 	definition.method = method
 	definition.parameters = parameters
 	definition.fields = fields
-	definitions.append(definition)
+	if _applying_scene:
+		_scene_bucket.append(definition)
+		_definition_scene[definition] = _active_scene_id
+	else:
+		definitions.append(definition)
 
 
 func _parameters(script: GDScript, method: StringName) -> Variant:
