@@ -53,6 +53,37 @@ static func build(target: GDScript, methods: Array) -> GDScript:
 	return script
 
 
+static func render_body(info: Dictionary, source: String) -> String:
+	var method_name := String(info.get("name", ""))
+	if not _identifier(method_name) or not defaults_ok(info):
+		return ""
+	var rendered := _signature(info)
+	var newline := source.find("\n")
+	var body := source.substr(newline + 1) if newline >= 0 else ""
+	var call := "AopDispatch.invoke(self, &\"%s\", [%s], Callable(self, &\"__aop_super_%s\"), __aop_chains)" % [method_name, _forward(info), method_name]
+	var lines := PackedStringArray()
+	lines.append("func %s%s:" % [method_name, rendered])
+	if _returns_void(info):
+		lines.append("\t%s" % call)
+	else:
+		lines.append("\treturn %s" % call)
+	lines.append("")
+	lines.append("func __aop_super_%s(args: Array) -> Variant:" % method_name)
+	var args: Array = info.get("args", [])
+	for index in args.size():
+		var argument: Dictionary = args[index]
+		var arg_name := String(argument.get("name", ""))
+		if not _identifier(arg_name):
+			arg_name = "arg%d" % index
+		lines.append("\tvar %s = args[%d]" % [arg_name, index])
+	for raw in body.split("\n"):
+		lines.append(raw)
+	if _returns_void(info):
+		lines.append("\treturn null")
+	lines.append("")
+	return "\n".join(lines)
+
+
 static func _signature(info: Dictionary) -> String:
 	var args: Array = info.get("args", [])
 	var defaults: Array = info.get("default_args", [])

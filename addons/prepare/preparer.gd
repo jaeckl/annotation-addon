@@ -20,6 +20,31 @@ static func prepare(instance: Object, arguments: Array = []) -> bool:
 	return writer.ok
 
 
+## One field, without writing it. A setter calls this so the write cannot
+## re-enter. ok is false when a preparation fails or the result cannot be
+## stored, and value is then the original value.
+static func prepare_member(script: GDScript, member_name: StringName, value: Variant) -> Dictionary:
+	if script == null:
+		return {"ok": true, "value": value, "message": "", "name": ""}
+	var walker := _Member.new(_script_name(script), String(member_name), value)
+	var current := script
+	while current != null:
+		AnnotationUtils.for_each_annotation_initialized(Preparation, current, walker.take)
+		if not walker.ok:
+			return {"ok": false, "value": value, "message": walker.message, "name": walker.prep_name}
+		current = current.get_base_script()
+	return {"ok": true, "value": walker.value, "message": "", "name": ""}
+
+
+static func _script_name(script: GDScript) -> String:
+	if script == null:
+		return "?"
+	var global_name := String(script.get_global_name())
+	if global_name.is_empty():
+		return script.resource_path.get_file()
+	return global_name
+
+
 class _Writer:
 	extends RefCounted
 
@@ -51,6 +76,7 @@ class _Writer:
 			_apply(preparation, arguments[index], int(parameter.type), "_init/%s" % parameter.name, func(value: Variant) -> void: arguments[index] = value)
 
 	func _apply(preparation: Preparation, current: Variant, type_code: int, member_name: String, write: Callable) -> void:
+		preparation.reset()
 		var result: Variant = preparation.apply(current)
 		if preparation.failed():
 			ok = false
@@ -87,3 +113,56 @@ class _Writer:
 		if global_name.is_empty():
 			return script.resource_path.get_file()
 		return global_name
+
+
+class _Member:
+	extends RefCounted
+
+	var owner: String
+	var member: String
+	var value: Variant
+	var ok := true
+	var message := ""
+	var prep_name := ""
+
+	func _init(owner_name: String, member_name: String, start: Variant) -> void:
+		owner = owner_name
+		member = member_name
+		value = start
+
+	func take(annotation: Object, target: Object) -> void:
+		if not ok:
+			return
+		var preparation := annotation as Preparation
+		if preparation == null or not (target is VariableInfo):
+			return
+		var variable := target as VariableInfo
+		if variable.is_static or String(variable.name) != member:
+			return
+		preparation.reset()
+		var result: Variant = preparation.apply(value)
+		prep_name = _prep_name(preparation)
+		if preparation.failed():
+			ok = false
+			message = preparation.failure_message()
+			return
+		if _fits(int(variable.type), result):
+			value = result
+			return
+		ok = false
+		message = "Prepare: %s.%s cannot store %s from %s." % [owner, member, type_string(typeof(result)), prep_name]
+		push_error(message)
+
+	func _fits(type_code: int, result: Variant) -> bool:
+		if type_code == TYPE_NIL:
+			return true
+		var got := typeof(result)
+		if got == type_code:
+			return true
+		return type_code == TYPE_FLOAT and got == TYPE_INT
+
+	func _prep_name(preparation: Preparation) -> String:
+		var script := preparation.get_script() as GDScript
+		if script != null and not String(script.get_global_name()).is_empty():
+			return String(script.get_global_name())
+		return "Preparation"
