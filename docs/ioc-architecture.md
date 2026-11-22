@@ -310,6 +310,20 @@ stateDiagram-v2
 | Node | Child of the tree root. Container stores the lookup. | Child of the scene root. Container stores the lookup. |
 | RefCounted | Held in the app map. | Held in the scene map until the root exits. |
 
+## First slice
+
+The first running slice uses only the decisions above that it needs.
+
+It includes `IOCMainLoop` as a `SceneTree`, `@Configuration` separate from `@Component`, discovery of global classes, app scope, class products and factory methods, injection of factory parameters, `_init` parameters, and `@Inject` fields on objects the container itself creates, parent-type matching, and the default qualifier matcher including a user subclass of `@Qualifier`. `QualifierMatcher`, `CandidateSelector`, and `AppScope` exist as the objects the container calls. A factory method with no declared return type is a registration error. A missing or ambiguous candidate is `push_error` with the candidate scripts named, and `resolve` returns null. The sample is one app-scoped `Node`, one `RefCounted`, two subclasses of one parent, and one `@Qualifier` that selects between them.
+
+It does not include scene scope, conditions, profiles, a custom `ScopeHandler`, or a replacement policy. It does not inject nodes the scene file already created. Those nodes exist before `resolve` runs, and this plan does not yet say when their `@Inject` fields would be filled.
+
+## Still open
+
+Which node is the scene-scope root: the nearest ancestor with a `scene_file_path`, or only `current_scene`. The first slice does not choose, because it has no scene scope.
+
+Whether a node placed in a scene receives `@Inject` when it enters the tree. The first slice does not do that.
+
 ## Out of this plan
 
 Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. Concrete `@ConditionalOn*` checks are the next design pass. Each one is a subclass of `Condition`. Profile comparison is a later policy of that same shape. Neither becomes a branch inside the container.
