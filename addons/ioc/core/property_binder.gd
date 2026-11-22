@@ -4,8 +4,8 @@ extends RefCounted
 ## Writes PropertyEnvironment into @export fields. A missing key keeps the
 ## field default. An extra key is ignored. converters is walked in order.
 ## The first PropertyConverter that accepts the value produces the stored
-## value. A result of the wrong type fails the whole object. Only int,
-## float, bool, and String fields are accepted.
+## value. A result of the wrong type fails the whole object. Fields are
+## int, float, bool, String, or a Resource.
 var converters: Array = []
 
 
@@ -30,14 +30,15 @@ func bind(instance: Object, prefix: String, environment: PropertyEnvironment) ->
 			continue
 		seen[property_name] = true
 		var type_code := int(property.get("type", TYPE_NIL))
-		if not _supported(type_code):
-			push_error("IOC: %s.%s must be int, float, bool, or String." % [_script_name(script), property_name])
+		var type_name := _field_class(property)
+		if not _supported(type_code, type_name):
+			push_error("IOC: %s.%s must be int, float, bool, String, or Resource." % [_script_name(script), property_name])
 			return false
 		var key := "%s/%s" % [prefix, property_name]
 		if not environment.contains(key):
 			continue
 		var value: Variant = environment.get_value(key)
-		var converted := _convert(script, property_name, type_code, value)
+		var converted := _convert(script, property_name, type_code, type_name, value)
 		if not converted["ok"]:
 			return false
 		instance.set(StringName(property_name), converted["value"])
@@ -46,12 +47,16 @@ func bind(instance: Object, prefix: String, environment: PropertyEnvironment) ->
 	return _passes_validation(instance, script)
 
 
-func _convert(script: GDScript, property_name: String, type_code: int, value: Variant) -> Dictionary:
+func _convert(script: GDScript, property_name: String, type_code: int, type_name: String, value: Variant) -> Dictionary:
 	for converter in converters:
 		var candidate := converter as PropertyConverter
-		if candidate == null or not candidate.handles(type_code, value):
+		if candidate == null or not candidate.handles(type_code, value, type_name):
 			continue
-		var converted: Variant = candidate.convert(type_code, value)
+		candidate.failure = ""
+		var converted: Variant = candidate.convert(type_code, value, type_name)
+		if not candidate.failure.is_empty():
+			push_error("IOC: %s.%s %s" % [_script_name(script), property_name, candidate.failure])
+			return {"ok": false}
 		if typeof(converted) != type_code:
 			push_error("IOC: %s.%s converter %s produced %s for %s." % [_script_name(script), property_name, _script_name(candidate.get_script()), type_string(typeof(converted)), type_string(type_code)])
 			return {"ok": false}
@@ -60,8 +65,19 @@ func _convert(script: GDScript, property_name: String, type_code: int, value: Va
 	return {"ok": false}
 
 
-func _supported(type_code: int) -> bool:
-	return type_code == TYPE_INT or type_code == TYPE_FLOAT or type_code == TYPE_BOOL or type_code == TYPE_STRING
+func _field_class(property: Dictionary) -> String:
+	var named := String(property.get("class_name", ""))
+	if not named.is_empty():
+		return named
+	if int(property.get("hint", 0)) == PROPERTY_HINT_RESOURCE_TYPE:
+		return String(property.get("hint_string", ""))
+	return ""
+
+
+func _supported(type_code: int, type_name: String) -> bool:
+	if type_code == TYPE_INT or type_code == TYPE_FLOAT or type_code == TYPE_BOOL or type_code == TYPE_STRING:
+		return true
+	return type_code == TYPE_OBJECT and ResourcePropertyConverter.is_resource_class(type_name)
 
 
 func _passes_prepare(instance: Object, script: GDScript) -> bool:
