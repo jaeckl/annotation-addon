@@ -42,6 +42,9 @@ var _app_schedules: Array = []
 var _app_physics_schedules: Array = []
 var _scene_schedules: Dictionary = {}
 var _scene_physics_schedules: Dictionary = {}
+var _app_destroy: Array = []
+var _scene_destroy: Dictionary = {}
+var _destroying := false
 var _frame: FrameDriver
 var _app_input: Array = []
 var _scene_input: Dictionary = {}
@@ -98,6 +101,7 @@ func setup(tree: SceneTree) -> void:
 func shutdown() -> void:
 	if _tree == null:
 		return
+	_destroy_open()
 	_drop_signal_links(-1)
 	_pooled.clear()
 	_pool_free.clear()
@@ -313,6 +317,7 @@ func _on_node_removed(node: Node) -> void:
 	var scene_id := node.get_instance_id()
 	if not _open_scenes.has(scene_id):
 		return
+	_destroy_scene(scene_id)
 	var leaving: Array = _scene_definitions.get(scene_id, [])
 	for definition in leaving:
 		_definition_scene.erase(definition)
@@ -760,9 +765,10 @@ func _remember(definition: ComponentDefinition, instance: Object) -> void:
 		bucket[definition] = instance
 		_scene_instances[scene_id] = bucket
 		_attach_scene(scene_id, instance)
-		return
-	app_scope.store(definition, instance)
-	app_scope.attach(instance)
+	else:
+		app_scope.store(definition, instance)
+		app_scope.attach(instance)
+	_arm_lifecycle(instance, scene_id, report)
 
 
 func _attach_scene(scene_id: int, instance: Object) -> void:
@@ -1097,6 +1103,184 @@ func _reject_configuration_schedule(_annotation: Object, target: Object, bucket:
 		push_error("IOC: %s.%s is @Scheduled on a configuration. Put it on a component." % [_script_name(script), info.name])
 		return
 	push_error("IOC: @Scheduled on %s belongs on a method." % _script_name(script))
+
+
+func _arm_lifecycle(instance: Object, scene_id: int, report: bool) -> void:
+	var script := instance.get_script() as GDScript
+	if script == null:
+		return
+	var found := _collect_lifecycle(script, report)
+	for item in found:
+		if String(item.get("kind", "")) == "ready":
+			continue
+		_append_destroy(scene_id, {
+			"instance": instance,
+			"method": item.get("method"),
+			"script": item.get("script"),
+		})
+	for item in found:
+		if String(item.get("kind", "")) != "ready":
+			continue
+		_call_lifecycle(instance, item)
+
+
+func _call_lifecycle(instance: Object, record: Dictionary) -> void:
+	if instance == null or not is_instance_valid(instance):
+		return
+	var value: Variant = instance.call(record.get("method"))
+	if not _is_suspended(value):
+		return
+	var script := record.get("script") as GDScript
+	push_error("IOC: %s.%s cannot await." % [_script_name(script), record.get("method")])
+
+
+func _append_destroy(scene_id: int, record: Dictionary) -> void:
+	if scene_id == 0:
+		_app_destroy.append(record)
+		return
+	var bucket: Array = _scene_destroy.get(scene_id, [])
+	bucket.append(record)
+	_scene_destroy[scene_id] = bucket
+
+
+func _destroy_open() -> void:
+	if _destroying:
+		return
+	_destroying = true
+	var scene_ids: Array = _scene_destroy.keys()
+	for index in range(scene_ids.size() - 1, -1, -1):
+		_destroy_scene(int(scene_ids[index]))
+	var pending: Array = _app_destroy.duplicate()
+	_app_destroy.clear()
+	_destroy_records(pending)
+	_destroying = false
+
+
+func _destroy_scene(scene_id: int) -> void:
+	if not _scene_destroy.has(scene_id):
+		return
+	var records: Array = _scene_destroy[scene_id]
+	_scene_destroy.erase(scene_id)
+	_destroy_records(records)
+
+
+func _destroy_records(records: Array) -> void:
+	var groups: Array = []
+	for record in records:
+		var instance: Object = record.get("instance")
+		var same := false
+		if not groups.is_empty():
+			var last: Dictionary = groups.back()
+			same = last.get("instance") == instance
+		if not same:
+			groups.append({"instance": instance, "calls": []})
+		var group: Dictionary = groups.back()
+		var calls: Array = group.get("calls")
+		calls.append(record)
+	for index in range(groups.size() - 1, -1, -1):
+		var group: Dictionary = groups[index]
+		var calls: Array = group.get("calls")
+		var instance: Object = group.get("instance")
+		for call in calls:
+			_call_lifecycle(instance, call)
+
+
+func _collect_lifecycle(script: GDScript, report: bool) -> Array:
+	var found: Array = []
+	if script == null:
+		return found
+	if _is_node_script(script):
+		if report:
+			_reject_lifecycle_on_node(script)
+		return found
+	var current := script
+	while current != null:
+		var bucket := {"script": current, "found": found, "report": report}
+		AnnotationUtils.for_each_annotation_initialized(Ready, current, _take_lifecycle.bind(bucket, "ready", "Ready"))
+		AnnotationUtils.for_each_annotation_initialized(OnDestroy, current, _take_lifecycle.bind(bucket, "destroy", "OnDestroy"))
+		current = current.get_base_script()
+	return found
+
+
+func _take_lifecycle(_annotation: Object, target: Object, bucket: Dictionary, kind: String, label: String) -> void:
+	var script := bucket["script"] as GDScript
+	var report: bool = bucket["report"]
+	if not (target is FunctionInfo):
+		if report:
+			push_error("IOC: @%s on %s belongs on a method." % [label, _script_name(script)])
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		if report:
+			push_error("IOC: %s.%s is static and cannot use @%s." % [_script_name(script), info.name, label])
+		return
+	if _method_args(script, info.name).size() != 0:
+		if report:
+			push_error("IOC: %s.%s must take nothing." % [_script_name(script), info.name])
+		return
+	bucket["found"].append({
+		"kind": kind,
+		"method": info.name,
+		"script": script,
+	})
+
+
+func _reject_lifecycle_on_node(script: GDScript) -> void:
+	var current := script
+	while current != null:
+		var bucket := {"script": current}
+		AnnotationUtils.for_each_annotation_initialized(Ready, current, _reject_node_lifecycle.bind(bucket, "Ready"))
+		AnnotationUtils.for_each_annotation_initialized(OnDestroy, current, _reject_node_lifecycle.bind(bucket, "OnDestroy"))
+		current = current.get_base_script()
+
+
+func _reject_node_lifecycle(_annotation: Object, target: Object, bucket: Dictionary, label: String) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @%s on a Node." % [_script_name(script), info.name, label])
+		return
+	push_error("IOC: @%s on %s belongs on a method." % [label, _script_name(script)])
+
+
+func _reject_configuration_lifecycle(script: GDScript) -> void:
+	var bucket := {"script": script}
+	AnnotationUtils.for_each_annotation_initialized(Ready, script, _reject_configuration_lifecycle_mark.bind(bucket, "Ready"))
+	AnnotationUtils.for_each_annotation_initialized(OnDestroy, script, _reject_configuration_lifecycle_mark.bind(bucket, "OnDestroy"))
+
+
+func _reject_configuration_lifecycle_mark(_annotation: Object, target: Object, bucket: Dictionary, label: String) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @%s on a configuration. Put it on a component." % [_script_name(script), info.name, label])
+		return
+	push_error("IOC: @%s on %s belongs on a method." % [label, _script_name(script)])
+
+
+func _reject_pooled_lifecycle(script: GDScript) -> void:
+	var current := script
+	while current != null:
+		var bucket := {"script": current, "owner": script}
+		AnnotationUtils.for_each_annotation_initialized(Ready, current, _reject_pooled_life.bind(bucket, "Ready"))
+		AnnotationUtils.for_each_annotation_initialized(OnDestroy, current, _reject_pooled_life.bind(bucket, "OnDestroy"))
+		current = current.get_base_script()
+
+
+func _reject_pooled_life(_annotation: Object, target: Object, bucket: Dictionary, label: String) -> void:
+	var script := bucket["script"] as GDScript
+	var owner := bucket["owner"] as GDScript
+	if not (target is FunctionInfo):
+		push_error("IOC: @%s on %s belongs on a method." % [label, _script_name(script)])
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		push_error("IOC: %s.%s is static and cannot use @%s." % [_script_name(script), info.name, label])
+		return
+	if _method_args(script, info.name).size() != 0:
+		push_error("IOC: %s.%s must take nothing." % [_script_name(script), info.name])
+		return
+	push_error("IOC: %s.%s is @%s and %s is pooled." % [_script_name(script), info.name, label, _script_name(owner)])
 
 
 func _store_ticks(instance: Object, scene_id: int, report: bool) -> void:
@@ -2137,6 +2321,7 @@ func _register_pooled(script: GDScript) -> void:
 	_collect_input(script, true)
 	_collect_actions(script, true)
 	_collect_signals(script, true)
+	_reject_pooled_lifecycle(script)
 	var limit := _pool_limit_of(script)
 	if limit < 0:
 		return
@@ -2169,6 +2354,7 @@ func _register_configuration(script: GDScript) -> void:
 	_reject_configuration_listeners(script)
 	_reject_configuration_ticks(script)
 	_reject_configuration_schedules(script)
+	_reject_configuration_lifecycle(script)
 	_reject_configuration_input(script)
 	_reject_configuration_actions(script)
 	_reject_configuration_signals(script)
@@ -2239,6 +2425,7 @@ func _register_property_product(script: GDScript) -> void:
 		return
 	_collect_ticks(script, true)
 	_collect_schedules(script, true)
+	_collect_lifecycle(script, true)
 	_collect_input(script, true)
 	_collect_actions(script, true)
 	_collect_signals(script, true)
@@ -2299,6 +2486,7 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 	_collect_listeners(return_script, true)
 	_collect_ticks(return_script, true)
 	_collect_schedules(return_script, true)
+	_collect_lifecycle(return_script, true)
 	_collect_input(return_script, true)
 	_collect_actions(return_script, true)
 	_collect_signals(return_script, true)
@@ -2326,6 +2514,7 @@ func _register_class_product(script: GDScript) -> void:
 	_collect_listeners(script, true)
 	_collect_ticks(script, true)
 	_collect_schedules(script, true)
+	_collect_lifecycle(script, true)
 	_collect_input(script, true)
 	_collect_actions(script, true)
 	_collect_signals(script, true)
