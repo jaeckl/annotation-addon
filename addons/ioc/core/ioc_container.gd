@@ -35,6 +35,8 @@ var _scene_bucket: Array = []
 var _app_listeners: Array = []
 var _scene_listeners: Dictionary = {}
 var _publishing: Array = []
+var _async_inflight: Dictionary = {}
+var _async_jobs: Array = []
 
 
 func setup(tree: SceneTree) -> void:
@@ -245,6 +247,7 @@ func _on_node_removed(node: Node) -> void:
 	_scene_instances.erase(scene_id)
 	_scene_listeners.erase(scene_id)
 	_open_scenes.erase(scene_id)
+	_cancel_scene_async(scene_id)
 
 
 func _open_existing_scenes() -> void:
@@ -323,7 +326,7 @@ func _newest_definition() -> ComponentDefinition:
 	return definitions[definitions.size() - 1]
 
 
-func publish_event(event: Event, from_node: Node = null) -> void:
+func publish_event(event: Event, from_node: Node = null, ancestors: Array = []) -> void:
 	if event == null:
 		push_error("IOC: publish needs an Event.")
 		return
@@ -331,19 +334,21 @@ func publish_event(event: Event, from_node: Node = null) -> void:
 	if event_script == null or not _is_event(event_script):
 		push_error("IOC: publish needs an Event.")
 		return
-	if _publishing.has(event_script):
+	if ancestors.has(event_script) or _publishing.has(event_script) or int(_async_inflight.get(event_script, 0)) > 0:
 		push_error("IOC: publish of %s is already in progress." % _script_name(event_script))
 		return
 	_publishing.append(event_script)
-	_deliver(_app_listeners, event, event_script, from_node)
-	if from_node != null:
+	var chain := ancestors.duplicate()
+	chain.append(event_script)
+	_deliver(_app_listeners, event, event_script, from_node, chain)
+	if from_node != null and is_instance_valid(from_node):
 		var root := _scene_root_of(from_node)
 		if root != null:
-			_deliver(_scene_listeners.get(root.get_instance_id(), []), event, event_script, from_node)
+			_deliver(_scene_listeners.get(root.get_instance_id(), []), event, event_script, from_node, chain)
 	_publishing.pop_back()
 
 
-func _deliver(listeners: Array, event: Event, event_script: GDScript, from_node: Node) -> void:
+func _deliver(listeners: Array, event: Event, event_script: GDScript, from_node: Node, chain: Array) -> void:
 	for record in listeners:
 		var wanted := record.get("type") as GDScript
 		if wanted == null:
@@ -353,13 +358,90 @@ func _deliver(listeners: Array, event: Event, event_script: GDScript, from_node:
 		var instance: Object = record.get("instance")
 		if instance == null or not is_instance_valid(instance):
 			continue
-		var result: Variant = instance.call(record.get("method"), event)
-		if result == null:
+		_accept_return(instance.call(record.get("method"), event), record, from_node, chain)
+
+
+func _accept_return(result: Variant, record: Dictionary, from_node: Node, chain: Array) -> void:
+	if result == null:
+		return
+	if _is_suspended(result):
+		if not bool(record.get("async", false)):
+			push_error("IOC: %s.%s returned %s, not an Event." % [_listener_name(record), record.get("method"), type_string(typeof(result))])
+			return
+		_suspend(result, record, from_node, chain)
+		return
+	if not (result is Event):
+		push_error("IOC: %s.%s returned %s, not an Event." % [_listener_name(record), record.get("method"), type_string(typeof(result))])
+		return
+	publish_event(result, from_node, chain)
+
+
+func _is_suspended(result: Variant) -> bool:
+	if typeof(result) != TYPE_OBJECT:
+		return false
+	var obj := result as Object
+	return obj != null and obj.get_class() == "GDScriptFunctionState"
+
+
+func _suspend(state: Object, record: Dictionary, from_node: Node, chain: Array) -> void:
+	var script := chain[chain.size() - 1] as GDScript
+	var from_id := 0
+	if from_node != null and is_instance_valid(from_node):
+		from_id = from_node.get_instance_id()
+	var job := {
+		"done": false,
+		"script": script,
+		"scene_id": int(record.get("scene_id", 0)),
+		"state": state,
+	}
+	_async_inflight[script] = int(_async_inflight.get(script, 0)) + 1
+	_async_jobs.append(job)
+	var error := state.connect("completed", _resume_listener.bind(job, record, from_id, chain))
+	if error != OK:
+		job["done"] = true
+		_async_jobs.erase(job)
+		_release_async(script)
+		push_error("IOC: %s.%s could not suspend." % [_listener_name(record), record.get("method")])
+
+
+func _resume_listener(value: Variant, job: Dictionary, record: Dictionary, from_id: int, chain: Array) -> void:
+	if bool(job.get("done", false)):
+		return
+	job["done"] = true
+	job["state"] = null
+	_async_jobs.erase(job)
+	_release_async(job.get("script"))
+	var scene_id := int(job.get("scene_id", 0))
+	if scene_id != 0 and not _open_scenes.has(scene_id):
+		return
+	var from_node: Node = null
+	if from_id != 0 and is_instance_id_valid(from_id):
+		from_node = instance_from_id(from_id) as Node
+	_accept_return(value, record, from_node, chain)
+
+
+func _release_async(script: GDScript) -> void:
+	var left := int(_async_inflight.get(script, 1)) - 1
+	if left <= 0:
+		_async_inflight.erase(script)
+		return
+	_async_inflight[script] = left
+
+
+func _cancel_scene_async(scene_id: int) -> void:
+	for job in _async_jobs:
+		if int(job.get("scene_id", 0)) != scene_id or bool(job.get("done", false)):
 			continue
-		if not (result is Event):
-			push_error("IOC: %s.%s returned %s, not an Event." % [_script_name(instance.get_script()), record.get("method"), type_string(typeof(result))])
-			continue
-		publish_event(result, from_node)
+		job["done"] = true
+		job["state"] = null
+		_release_async(job.get("script"))
+
+
+func _listener_name(record: Dictionary) -> String:
+	var instance: Object = record.get("instance")
+	if instance == null:
+		return "?"
+	return _script_name(instance.get_script())
 
 
 func _register_event_publisher() -> void:
@@ -407,6 +489,8 @@ func _store_listeners(instance: Object, scene_id: int, report: bool) -> void:
 			"instance": instance,
 			"method": listener["method"],
 			"type": listener["type"],
+			"async": bool(listener.get("async", false)),
+			"scene_id": scene_id,
 		}
 		if scene_id != 0:
 			var bucket: Array = _scene_listeners.get(scene_id, [])
@@ -449,7 +533,11 @@ func _take_listener(annotation: Object, target: Object, bucket: Dictionary) -> v
 		if report:
 			push_error("IOC: %s.%s must take an Event." % [_script_name(script), info.name])
 		return
-	bucket["found"].append({"method": info.name, "type": event_script})
+	bucket["found"].append({
+		"method": info.name,
+		"type": event_script,
+		"async": AnnotationUtils.has_annotation(script, Async, info.name),
+	})
 
 
 func _reject_configuration_listeners(script: GDScript) -> void:
@@ -464,6 +552,19 @@ func _take_configuration_listener(annotation: Object, target: Object, bucket: Di
 		push_error("IOC: %s.%s is @EventListener on a configuration. Put it on a component." % [_script_name(script), info.name])
 		return
 	push_error("IOC: @EventListener on %s belongs on a method." % _script_name(script))
+
+
+func _reject_misplaced_async(script: GDScript) -> void:
+	AnnotationUtils.for_each_annotation_initialized(Async, script, _take_async.bind(script))
+
+
+func _take_async(annotation: Object, target: Object, script: GDScript) -> void:
+	if not (target is FunctionInfo):
+		push_error("IOC: @Async on %s belongs on a method." % _script_name(script))
+		return
+	var info := target as FunctionInfo
+	if not AnnotationUtils.has_annotation(script, EventListener, info.name):
+		push_error("IOC: %s.%s is @Async without @EventListener." % [_script_name(script), info.name])
 
 
 func _is_event(script: GDScript) -> bool:
@@ -482,6 +583,7 @@ func _class_product(script: GDScript) -> ComponentDefinition:
 
 
 func _scan(script: GDScript) -> void:
+	_reject_misplaced_async(script)
 	if AnnotationUtils.has_annotation(script, Configuration):
 		_register_configuration(script)
 		return

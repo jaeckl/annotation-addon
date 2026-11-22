@@ -17,7 +17,7 @@ run/main_loop_type="IOCMainLoop"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/annotation_reflect/plugin.cfg", "res://addons/prepare/plugin.cfg", "res://addons/validation/plugin.cfg")
+enabled=PackedStringArray("res://addons/annotation_reflect/plugin.cfg", "res://addons/gut/plugin.cfg", "res://addons/prepare/plugin.cfg", "res://addons/validation/plugin.cfg")
 
 [audio]
 

@@ -1,0 +1,8 @@
+{
+	"dirs": ["res://test/ioc"],
+	"prefix": "test_",
+	"suffix": ".gd",
+	"should_exit": true,
+	"should_exit_on_success": true,
+	"ignore_pause": true
+}
