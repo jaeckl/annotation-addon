@@ -86,6 +86,14 @@ func _ready() -> void:
 	_check(lines, box.resolve(RaidBanner) != null and box.resolve(CombatFlag) != null and box.resolve(QuietMatch) != null and box.resolve(MissingOn) != null and box.resolve(OpenGate) != null and box.resolve(BothOpen) != null, "matching property conditions register")
 	_check(lines, not _has_label(box, "PeaceBanner") and not _has_label(box, "QuietFlag") and not _has_label(box, "MissingOff") and not _has_label(box, "PresentButWrong") and not _has_label(box, "BothGates"), "failed property conditions stay unregistered")
 	_check(lines, not _has_label(box, "GateFactory.shut") and box.configuration(ClosedFactory) == null and not _has_label(box, "ClosedFactory.ghost") and not _has_label(box, "HiddenAudio"), "a failed condition skips the factory method, the configuration, and the settings object")
+	_check(lines, _has_label(box, "EditorBanner") == OS.has_feature("editor") and _has_label(box, "TemplateBanner") == OS.has_feature("template"), "a feature tag gates the component")
+	_check(lines, _has_label(box, "DebugEditorBanner") == (OS.has_feature("editor") and OS.has_feature("debug")), "every feature condition must match")
+	_check(lines, _has_label(box, "EditorTemplateBanner") == (OS.has_feature("editor") and OS.has_feature("template")), "a missing feature skips the component")
+	_check(lines, _has_label(box, "RaidFeature") == OS.has_feature("raid"), "a custom feature tag gates the component")
+	_check(lines, _has_label(box, "FeatureFactory.editor_gate") == OS.has_feature("editor") and _has_label(box, "FeatureFactory.template_gate") == OS.has_feature("template"), "a feature tag gates the factory method")
+	_check(lines, (box.configuration(TemplateFactory) != null) == OS.has_feature("template") and _has_label(box, "TemplateFactory.ghost") == OS.has_feature("template") and _has_label(box, "HiddenFeatureAudio") == OS.has_feature("template"), "a missing feature skips the configuration and the settings object")
+	if OS.has_feature("editor"):
+		_check(lines, box.resolve(EditorBanner) != null and box.resolve(EditorGate) != null, "the editor feature component resolves")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):

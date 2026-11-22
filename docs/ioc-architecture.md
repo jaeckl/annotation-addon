@@ -185,7 +185,7 @@ sequenceDiagram
     Loop->>Box: install every ScopeHandler subclass
 ```
 
-`Condition` is the base. `@ConditionalOnProperty` is the first check. `@ConditionalOnFeature`, `@ConditionalOnClass`, `@ConditionalOnComponent`, `@ConditionalOnResource`, and `@ConditionalOnNode` are later subclasses. The container does not special-case each name. It asks each condition annotation on the target whether the definition may be registered.
+`Condition` is the base. `@ConditionalOnProperty` and `@ConditionalOnFeature` are the checks. `@ConditionalOnComponent`, `@ConditionalOnResource`, and `@ConditionalOnNode` are later subclasses. The container does not special-case each name. It asks each condition annotation on the target whether the definition may be registered.
 
 `ComponentDefinition.type` is the component script, or the factory method's declared return type. `qualifiers` is every annotation on that class or method that extends `Qualifier`, each with its attributes. The container keeps a list of definitions. It does not key that list by exact script, because a request for a parent type must see every subclass.
 
@@ -405,8 +405,10 @@ The binder holds an ordered `PropertyConverter` list. The first converter whose 
 
 `@ConditionalOnProperty` reads one environment key while a class, a factory method, or a settings object is registered. It does not resolve the bound settings object. An empty `having_value` matches a present value other than false. `having_value` compares a bool as `true` or `false`, ignoring case, and compares every other value as text. `match_if_missing` matches only when the key is absent. A present value is still compared. Several conditions on the same target all have to match. A failed check skips that definition and does not push an error. A failed check on a `@Configuration` class skips its factory methods and its property scan. The annotation is repeatable.
 
-`@ConditionalOnFeature`, `@ConditionalOnClass`, `@ConditionalOnMissingClass`, `@ConditionalOnComponent`, `@ConditionalOnMissingComponent`, `@ConditionalOnResource`, and `@ConditionalOnNode` are the later checks. `@ConditionalOnNode` waits until a scene root enters.
+`@ConditionalOnFeature` matches when `OS.has_feature` has the named tag. `editor`, `debug`, `template`, `dedicated_server`, `mobile`, `web`, and a custom export tag all use it. This is the profile check. A missing tag skips the definition. Several feature conditions on one target all have to match. A failed check on a `@Configuration` class skips its methods and its property scan.
+
+`@ConditionalOnComponent` and `@ConditionalOnMissingComponent` are the next checks. They run after the full definition list exists, and a default does not count itself. `@ConditionalOnClass` waits for an addon whose class is not a product of this container. `@ConditionalOnResource` and `@ConditionalOnNode` stay later. `@ConditionalOnNode` waits until a scene root enters.
 
 ## Out of this plan
 
-Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. `@ConditionalOnFeature` is the later form of a profile check, using `OS.has_feature`. The other `@ConditionalOn*` checks stay later subclasses of `Condition`. None of them becomes a branch inside the container.
+Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. `@ConditionalOnClass` stays unused until an addon boundary needs a string class name. The other `@ConditionalOn*` checks stay later subclasses of `Condition`. None of them becomes a branch inside the container.
