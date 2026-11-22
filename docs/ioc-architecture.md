@@ -19,9 +19,11 @@ A dependency asks for a type. Every registered component whose type is that type
 
 A factory method's type is the declared return type. `-> Goblin` matches a request for `Goblin` and for `Enemy` when `Goblin` extends `Enemy`. `-> Enemy` matches `Enemy` only. The container does not guess a narrower runtime class from the method body.
 
-When more than one candidate matches, `@Qualifier` picks one. The same annotation sits on the product (the component class or the factory method) and on the injection point. The value is one string. Qualifier does not replace the type check. Two products with the same qualifier and the same parent still fail.
+When more than one candidate matches, qualifier annotations pick one. `@Qualifier` is the built-in annotation, and its `value` string is an ordinary attribute. A user qualifier is another annotation class that extends `Qualifier`, for example `@Offline` or `@Genre` with its own attributes. The container does not special-case the string. `AnnotationUtils` already returns a subclass use when the query class is the base, so a query for `Qualifier` sees `@Offline` and `@Genre`.
 
-Zero candidates fail. Several candidates and no qualifier on the injection point fail. The failure names the candidate scripts so the author can add the qualifier.
+Each qualifier annotation on the injection point must be satisfied by one on the candidate: same annotation class, same attribute values. Extra qualifier annotations on the candidate are fine. Qualifier does not replace the type check. Zero candidates fail. Several candidates and no qualifier annotation on the injection point fail. Several candidates that still match the same qualifiers fail. The failure names the candidate scripts.
+
+The container does not inline that comparison. `QualifierMatcher`, `CandidateSelector`, and `ScopeHandler` are the policies. A custom qualifier annotation uses the default matcher. A user who needs a different comparison subclasses `QualifierMatcher`. Subclassing and calling `super` keeps the default and adds a rule.
 
 Factory-method parameters and `_init` parameters are resolved before the call. `@Inject` fields are filled after `new()` and before the instance is published into its scope. If resolve re-enters a definition already being created, the container fails. It does not build a proxy.
 
@@ -77,10 +79,12 @@ flowchart TD
 classDiagram
     class GDScriptAnnotation
     class Component {
-        +scope: Scope
+        +scope: Script
     }
     class Configuration
-    class Condition
+    class Condition {
+        +matches(context) bool
+    }
     class Profile {
         +mode: String
     }
@@ -88,35 +92,44 @@ classDiagram
     class Qualifier {
         +value: String
     }
+    class Offline
+    class Genre {
+        +kind: String
+    }
+    class QualifierMatcher {
+        +matches(candidate, required) bool
+    }
+    class CandidateSelector {
+        +select(definitions, type, annotations) Array
+    }
+    class ScopeHandler {
+        +fetch(fromNode) Object
+        +store(fromNode, instance)
+        +attach(fromNode, instance)
+        +release(root)
+    }
+    class AppScope
+    class SceneScope
     class IOCMainLoop {
         +container: IOCContainer
         +_initialize()
         +_finalize()
     }
     class IOCContainer {
+        +matcher: QualifierMatcher
+        +selector: CandidateSelector
+        +scopes: Array
         +register(definition)
-        +resolve(type, qualifier, fromNode)
+        +resolve(type, annotations, fromNode)
         +open_scene(root)
         +close_scene(root)
     }
     class ComponentDefinition {
         +type: Script
-        +qualifier: String
-        +scope: Scope
+        +qualifiers: Array
+        +scope: ScopeHandler
         +producer: Callable
         +factory: Object
-    }
-    class Scope {
-        <<enumeration>>
-        APP
-        SCENE
-    }
-    class AppScope {
-        +instances: Dictionary
-    }
-    class SceneScope {
-        +root: Node
-        +instances: Dictionary
     }
 
     GDScriptAnnotation <|-- Component
@@ -125,21 +138,56 @@ classDiagram
     GDScriptAnnotation <|-- Profile
     GDScriptAnnotation <|-- Inject
     GDScriptAnnotation <|-- Qualifier
+    Qualifier <|-- Offline
+    Qualifier <|-- Genre
+    ScopeHandler <|-- AppScope
+    ScopeHandler <|-- SceneScope
     SceneTree <|-- IOCMainLoop
     IOCMainLoop *-- IOCContainer
-    IOCContainer *-- AppScope
-    IOCContainer o-- SceneScope
+    IOCContainer *-- QualifierMatcher
+    IOCContainer *-- CandidateSelector
+    IOCContainer o-- ScopeHandler
     IOCContainer --> ComponentDefinition
-    ComponentDefinition --> Scope
-    Component --> Scope
-    SceneScope --> Node
+    ComponentDefinition --> ScopeHandler
+    CandidateSelector --> QualifierMatcher
 ```
+
+`Offline` and `Genre` are examples a game writes. They are not part of the addon.
 
 `Configuration` and `Component` are siblings. A component query does not match a configuration. A configuration class can still expose products, because those products are `@Component` methods, not the configuration annotation itself.
 
+## Policies
+
+The container calls a policy object. It does not contain a second copy of the rule.
+
+| Policy | Default | How a user extends it |
+| --- | --- | --- |
+| `QualifierMatcher` | Same annotation class, same attribute values. Each required annotation needs one match. | A subclass of `Qualifier` needs no new matcher. One global subclass of `QualifierMatcher` replaces the default. |
+| `CandidateSelector` | Assignable type, then the matcher. Zero or several remaining definitions fail. | One global subclass replaces the default. That is where a primary rule would live. The default has none. |
+| `Condition` | The annotation's `matches` method. | A subclass such as `@ConditionalOnSetting` is the check. The container calls `matches` on each one it finds. |
+| `ScopeHandler` | `AppScope` and `SceneScope`. | Every concrete global subclass is installed, including the two built-ins. `@Component.scope` names the handler script. |
+
+Policy classes are found in the global class list before any product is registered. A policy class is not a product. `@Component` on it is ignored. Zero user subclasses of `QualifierMatcher` or `CandidateSelector` keeps the built-in. Two user subclasses of either one fail at startup and name both scripts. `ScopeHandler` does not use that replacement rule, because App and Scene stay present when a user adds another handler.
+
+```mermaid
+sequenceDiagram
+    participant Loop as IOCMainLoop
+    participant Scan as Global class list
+    participant Box as IOCContainer
+
+    Loop->>Scan: get_global_class_list()
+    Loop->>Box: default QualifierMatcher and CandidateSelector
+    alt one user subclass
+        Loop->>Box: replace that policy with the subclass
+    else several user subclasses
+        Loop-->>Loop: fail and name them
+    end
+    Loop->>Box: install every ScopeHandler subclass
+```
+
 `Condition` is the base for later checks (`ConditionalOnSetting`, `ConditionalOnType`, `ConditionalOnNode`). The container does not special-case each name. It asks each condition annotation on the target whether the definition may be registered.
 
-`ComponentDefinition.type` is the component script, or the factory method's declared return type. `qualifier` is the `@Qualifier` value on that class or method, or an empty string. The container keeps a list of definitions. It does not key that list by exact script, because a request for a parent type must see every subclass.
+`ComponentDefinition.type` is the component script, or the factory method's declared return type. `qualifiers` is every annotation on that class or method that extends `Qualifier`, each with its attributes. The container keeps a list of definitions. It does not key that list by exact script, because a request for a parent type must see every subclass.
 
 ## Type match
 
@@ -156,25 +204,22 @@ classDiagram
 
 ```mermaid
 flowchart TD
-    ask["resolve(Enemy, qualifier, fromNode)"]
+    ask["CandidateSelector.select(Enemy, annotations)"]
     list["definitions whose type is Enemy or a subclass"]
-    q{"injection point has a qualifier?"}
-    named["keep the same qualifier"]
+    match["QualifierMatcher.matches"]
     count{"how many remain?"}
     fail0["fail: no candidate"]
     failN["fail: name every candidate"]
     one["that definition"]
-    scope["App or Scene cache"]
+    scope["definition.scope fetch or store"]
 
-    ask --> list --> q
-    q -->|yes| named --> count
-    q -->|no| count
+    ask --> list --> match --> count
     count -->|0| fail0
     count -->|many| failN
     count -->|one| one --> scope
 ```
 
-`@Qualifier("brute")` on `Orc` and on the `Enemy` parameter selects `Orc`. The same parameter with no qualifier fails while both subclasses are registered. If `Goblin` is the only `Enemy`, the parameter needs no qualifier.
+`@Qualifier("brute")` on `Orc` and on the `Enemy` parameter selects `Orc`, because `value` is `"brute"` on both. `@Offline` on `Orc` and on the parameter selects `Orc` with no string. `@Genre("boss")` matches only a candidate whose `@Genre.kind` is `"boss"`. The same parameter with no qualifier annotation fails while both subclasses are registered. If `Goblin` is the only `Enemy`, the parameter needs no qualifier. A custom matcher is what runs inside `QualifierMatcher.matches`. The selector does not know the annotation classes.
 
 ## Registration
 
@@ -189,6 +234,7 @@ sequenceDiagram
 
     Loop->>Tree: super()._initialize()
     Loop->>Box: new IOCContainer
+    Loop->>Box: install policies
     Loop->>Scan: get_global_class_list()
     loop each GDScript
         Loop->>Utils: has_annotation(script, Configuration)
@@ -196,13 +242,13 @@ sequenceDiagram
             Loop->>Factory: script.new()
             Loop->>Utils: for_each_annotation_initialized(Component, script)
             Utils-->>Loop: annotation, FunctionInfo or ScriptInfo
-            Loop->>Loop: read Condition, Profile, and Qualifier on that target
+            Loop->>Loop: read Condition, Profile, and every Qualifier subclass on that target
             alt conditions pass
                 Loop->>Box: register(ComponentDefinition)
             end
         else class-level Component
             Loop->>Utils: has_annotation(script, Component)
-            Loop->>Loop: read Condition, Profile, and Qualifier on the class
+            Loop->>Loop: read Condition, Profile, and every Qualifier subclass on the class
             alt conditions pass
                 Loop->>Box: register(producer = script.new)
             end
@@ -220,34 +266,29 @@ Method-level `@Component` is valid only on a configuration class. On any other c
 sequenceDiagram
     participant Node as Caller node
     participant Box as IOCContainer
-    participant Scene as Scene root
-    participant App as App scope
+    participant Select as CandidateSelector
+    participant Scope as ScopeHandler
     participant Producer as producer Callable
 
-    Node->>Box: resolve(Type, qualifier, fromNode)
-    Box->>Box: candidates = assignable type, then qualifier
+    Node->>Box: resolve(Type, annotations, fromNode)
+    Box->>Select: select(definitions, Type, annotations)
     alt zero or several candidates
         Box-->>Node: fail
-    else one candidate, scope Scene, this root has an instance
-        Box-->>Node: existing instance
-    else one candidate, scope Scene, this root has none
-        Box->>Box: resolve each producer parameter
-        Box->>Producer: call()
-        Box->>Box: fill @Inject fields
-        Box->>Scene: parent Node under the scene root
-        Box-->>Node: instance
-    else one candidate, scope App, instance exists
-        Box-->>Node: existing instance
-    else one candidate, scope App, none exists
-        Box->>Box: resolve each producer parameter
-        Box->>Producer: call()
-        Box->>Box: fill @Inject fields
-        Box->>App: parent Node under the tree root, or hold RefCounted
-        Box-->>Node: instance
+    else one candidate
+        Box->>Scope: fetch(fromNode)
+        alt instance exists
+            Box-->>Node: existing instance
+        else
+            Box->>Box: resolve each producer parameter
+            Box->>Producer: call()
+            Box->>Box: fill @Inject fields
+            Box->>Scope: attach and store
+            Box-->>Node: instance
+        end
     end
 ```
 
-The caller passes the node it is running on. Qualifier selection happens before the scope cache. Scene scope walks parents to the instanced scene root. App scope ignores that root. A scene-scoped `Node` is parented under the scene root. An app-scoped `Node` is parented under the tree root. A `RefCounted` is stored in the scope map and is not parented.
+The caller passes the node it is running on. The selector runs before the scope cache. `SceneScope` walks parents to the instanced scene root. `AppScope` ignores that root. A scene-scoped `Node` is parented under the scene root. An app-scoped `Node` is parented under the tree root. A `RefCounted` is stored by the handler and is not parented. A user `ScopeHandler` decides its own key, parent, and release.
 
 ## Scope lifecycle
 
@@ -260,7 +301,7 @@ stateDiagram-v2
     AppOpen --> [*]: _finalize
 ```
 
-`close_scene` drops that root's map. Node products under the root are freed by the tree. The container does not free them again. `RefCounted` products for that scene are released with the map.
+`close_scene` calls `release` on every installed `ScopeHandler`. `SceneScope` drops that root's map. A user handler releases whatever key it stored for that root. Node products under the root are freed by the tree. The container does not free them again. `RefCounted` products for that scene are released with the map.
 
 ## What the container stores
 
@@ -271,4 +312,4 @@ stateDiagram-v2
 
 ## Out of this plan
 
-Inner-class scan, scripts without `class_name`, and more scopes than App and Scene. No `@Primary`: several candidates always need `@Qualifier`. Conditions and profiles are named here so the factory has a place to read them. Their concrete checks are the next design pass.
+Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. Concrete `@ConditionalOn*` checks are the next design pass. Each one is a subclass of `Condition`. Profile comparison is a later policy of that same shape. Neither becomes a branch inside the container.
