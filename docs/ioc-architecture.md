@@ -13,7 +13,17 @@ The current stubs still have `Configuration` extending `Component`, and `IOCMain
 - On a class, the product is that class. The container calls `new()` on the script.
 - On a method, the product is the method's return value. The container calls the method on the factory. This is the factory method. There is no separate `@Bean`.
 
-`@Component` is not an injection mark. A later annotation owns parameters and fields.
+`@Inject` is the injection mark. It sits on a field, on an `_init` parameter, or on a factory-method parameter. `@Component` does not inject.
+
+A dependency asks for a type. Every registered component whose type is that type, or a subclass of it, is a candidate. One subclass is enough. The parent class does not need its own `@Component`. Godot has no interfaces, so the parent is a base class. The container walks `get_base_script()` to decide.
+
+A factory method's type is the declared return type. `-> Goblin` matches a request for `Goblin` and for `Enemy` when `Goblin` extends `Enemy`. `-> Enemy` matches `Enemy` only. The container does not guess a narrower runtime class from the method body.
+
+When more than one candidate matches, `@Qualifier` picks one. The same annotation sits on the product (the component class or the factory method) and on the injection point. The value is one string. Qualifier does not replace the type check. Two products with the same qualifier and the same parent still fail.
+
+Zero candidates fail. Several candidates and no qualifier on the injection point fail. The failure names the candidate scripts so the author can add the qualifier.
+
+Factory-method parameters and `_init` parameters are resolved before the call. `@Inject` fields are filled after `new()` and before the instance is published into its scope. If resolve re-enters a definition already being created, the container fails. It does not build a proxy.
 
 Conditions and profiles are their own annotations. The factory reads every annotation on the class or the method before it registers a definition. `@Profile` means a run mode (client, dedicated server, editor, or a project feature tag). `@ConditionalOn*` means a yes-or-no check against a setting, a registered type, or a node present in the active scope. Those annotations are not folded into `@Component`.
 
@@ -74,6 +84,10 @@ classDiagram
     class Profile {
         +mode: String
     }
+    class Inject
+    class Qualifier {
+        +value: String
+    }
     class IOCMainLoop {
         +container: IOCContainer
         +_initialize()
@@ -81,12 +95,13 @@ classDiagram
     }
     class IOCContainer {
         +register(definition)
-        +resolve(type, fromNode)
+        +resolve(type, qualifier, fromNode)
         +open_scene(root)
         +close_scene(root)
     }
     class ComponentDefinition {
         +type: Script
+        +qualifier: String
         +scope: Scope
         +producer: Callable
         +factory: Object
@@ -108,6 +123,8 @@ classDiagram
     GDScriptAnnotation <|-- Configuration
     GDScriptAnnotation <|-- Condition
     GDScriptAnnotation <|-- Profile
+    GDScriptAnnotation <|-- Inject
+    GDScriptAnnotation <|-- Qualifier
     SceneTree <|-- IOCMainLoop
     IOCMainLoop *-- IOCContainer
     IOCContainer *-- AppScope
@@ -121,6 +138,43 @@ classDiagram
 `Configuration` and `Component` are siblings. A component query does not match a configuration. A configuration class can still expose products, because those products are `@Component` methods, not the configuration annotation itself.
 
 `Condition` is the base for later checks (`ConditionalOnSetting`, `ConditionalOnType`, `ConditionalOnNode`). The container does not special-case each name. It asks each condition annotation on the target whether the definition may be registered.
+
+`ComponentDefinition.type` is the component script, or the factory method's declared return type. `qualifier` is the `@Qualifier` value on that class or method, or an empty string. The container keeps a list of definitions. It does not key that list by exact script, because a request for a parent type must see every subclass.
+
+## Type match
+
+```mermaid
+classDiagram
+    class Enemy
+    class Goblin
+    class Orc
+    Enemy <|-- Goblin
+    Enemy <|-- Orc
+```
+
+`Goblin` and `Orc` are both `@Component`. A dependency typed as `Enemy` sees both. A dependency typed as `Goblin` sees only `Goblin`.
+
+```mermaid
+flowchart TD
+    ask["resolve(Enemy, qualifier, fromNode)"]
+    list["definitions whose type is Enemy or a subclass"]
+    q{"injection point has a qualifier?"}
+    named["keep the same qualifier"]
+    count{"how many remain?"}
+    fail0["fail: no candidate"]
+    failN["fail: name every candidate"]
+    one["that definition"]
+    scope["App or Scene cache"]
+
+    ask --> list --> q
+    q -->|yes| named --> count
+    q -->|no| count
+    count -->|0| fail0
+    count -->|many| failN
+    count -->|one| one --> scope
+```
+
+`@Qualifier("brute")` on `Orc` and on the `Enemy` parameter selects `Orc`. The same parameter with no qualifier fails while both subclasses are registered. If `Goblin` is the only `Enemy`, the parameter needs no qualifier.
 
 ## Registration
 
@@ -142,13 +196,13 @@ sequenceDiagram
             Loop->>Factory: script.new()
             Loop->>Utils: for_each_annotation_initialized(Component, script)
             Utils-->>Loop: annotation, FunctionInfo or ScriptInfo
-            Loop->>Loop: read Condition and Profile on that target
+            Loop->>Loop: read Condition, Profile, and Qualifier on that target
             alt conditions pass
                 Loop->>Box: register(ComponentDefinition)
             end
         else class-level Component
             Loop->>Utils: has_annotation(script, Component)
-            Loop->>Loop: read Condition and Profile on the class
+            Loop->>Loop: read Condition, Profile, and Qualifier on the class
             alt conditions pass
                 Loop->>Box: register(producer = script.new)
             end
@@ -170,24 +224,30 @@ sequenceDiagram
     participant App as App scope
     participant Producer as producer Callable
 
-    Node->>Box: resolve(Type, fromNode)
-    Box->>Scene: walk parents to scene root
-    alt scope is Scene and this root has an instance
+    Node->>Box: resolve(Type, qualifier, fromNode)
+    Box->>Box: candidates = assignable type, then qualifier
+    alt zero or several candidates
+        Box-->>Node: fail
+    else one candidate, scope Scene, this root has an instance
         Box-->>Node: existing instance
-    else scope is Scene and this root has none
+    else one candidate, scope Scene, this root has none
+        Box->>Box: resolve each producer parameter
         Box->>Producer: call()
+        Box->>Box: fill @Inject fields
         Box->>Scene: parent Node under the scene root
         Box-->>Node: instance
-    else scope is App and an instance exists
+    else one candidate, scope App, instance exists
         Box-->>Node: existing instance
-    else scope is App and none exists
+    else one candidate, scope App, none exists
+        Box->>Box: resolve each producer parameter
         Box->>Producer: call()
+        Box->>Box: fill @Inject fields
         Box->>App: parent Node under the tree root, or hold RefCounted
         Box-->>Node: instance
     end
 ```
 
-The caller passes the node it is running on. Scene scope walks parents to the instanced scene root. App scope ignores that root. A scene-scoped `Node` is parented under the scene root. An app-scoped `Node` is parented under the tree root. A `RefCounted` is stored in the scope map and is not parented.
+The caller passes the node it is running on. Qualifier selection happens before the scope cache. Scene scope walks parents to the instanced scene root. App scope ignores that root. A scene-scoped `Node` is parented under the scene root. An app-scoped `Node` is parented under the tree root. A `RefCounted` is stored in the scope map and is not parented.
 
 ## Scope lifecycle
 
@@ -211,4 +271,4 @@ stateDiagram-v2
 
 ## Out of this plan
 
-Injection annotations, inner-class scan, scripts without `class_name`, and more scopes than App and Scene. Conditions and profiles are named here so the factory has a place to read them. Their concrete checks are the next design pass.
+Inner-class scan, scripts without `class_name`, and more scopes than App and Scene. No `@Primary`: several candidates always need `@Qualifier`. Conditions and profiles are named here so the factory has a place to read them. Their concrete checks are the next design pass.
