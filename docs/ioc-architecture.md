@@ -185,7 +185,7 @@ sequenceDiagram
     Loop->>Box: install every ScopeHandler subclass
 ```
 
-`Condition` is the base. `@ConditionalOnProperty`, `@ConditionalOnFeature`, `@ConditionalOnClass`, and `@ConditionalOnMissingClass` are the checks. `@ConditionalOnComponent`, `@ConditionalOnResource`, and `@ConditionalOnNode` are later subclasses. The container does not special-case each name. It asks each condition annotation on the target whether the definition may be registered.
+`Condition` is the base. `@ConditionalOnProperty`, `@ConditionalOnFeature`, `@ConditionalOnClass`, `@ConditionalOnMissingClass`, `@ConditionalOnComponent`, and `@ConditionalOnMissingComponent` are the checks. `@ConditionalOnResource` and `@ConditionalOnNode` are later subclasses. The container does not special-case the subclass name. It asks each condition annotation on the target whether the definition may be registered. A condition that reads the registry is held until the other definitions exist.
 
 `ComponentDefinition.type` is the component script, or the factory method's declared return type. `qualifiers` is every annotation on that class or method that extends `Qualifier`, each with its attributes. The container keeps a list of definitions. It does not key that list by exact script, because a request for a parent type must see every subclass.
 
@@ -409,7 +409,9 @@ The binder holds an ordered `PropertyConverter` list. The first converter whose 
 
 `@ConditionalOnClass` matches when the named native class, extension class, or global `class_name` exists. `@ConditionalOnMissingClass` matches when that name is absent. The name is text, because a script cannot mention a type that is not installed. This is for an addon boundary such as a third-party global class. It does not ask whether this container registered a component. Several class conditions on one target all have to match. A failed check skips the definition, and a failed check on a `@Configuration` class skips its methods and its property scan.
 
-`@ConditionalOnComponent` and `@ConditionalOnMissingComponent` are the next checks. They run after the full definition list exists, and a default does not count itself. `@ConditionalOnResource` and `@ConditionalOnNode` stay later. `@ConditionalOnNode` waits until a scene root enters.
+`@ConditionalOnComponent` matches when a registered product is the named global class or a subclass of it. `@ConditionalOnMissingComponent` matches when no such product is registered. Both wait until every definition that does not read the registry has been registered. The candidate does not count itself, and neither does another product that also reads the registry, so scan order cannot decide. A name that is not a global GDScript class is `push_error` and does not match. A failed earlier condition still skips the definition before that pass. A failed check on a `@Configuration` class skips its methods and its property scan.
+
+`@ConditionalOnResource` and `@ConditionalOnNode` stay later. `@ConditionalOnNode` waits until a scene root enters.
 
 ## Out of this plan
 

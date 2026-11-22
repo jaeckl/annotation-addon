@@ -18,6 +18,10 @@ var _creating: Array = []
 var _field_cache: Dictionary = {}
 var _collection_failed := false
 var _tree: SceneTree
+var _deferred: Array = []
+var _registry_scripts: Array = []
+var _applying_deferred := false
+var _property_seen: Dictionary = {}
 
 
 func setup(tree: SceneTree) -> void:
@@ -113,6 +117,9 @@ func _parser_for(path: String) -> PropertySourceParser:
 func discover() -> void:
 	_scripts.clear()
 	_property_roots.clear()
+	_deferred.clear()
+	_property_seen.clear()
+	_applying_deferred = false
 	for entry in ProjectSettings.get_global_class_list():
 		if String(entry.get("language", "")) != "GDScript":
 			continue
@@ -123,6 +130,7 @@ func discover() -> void:
 	for global_name in _scripts:
 		_scan(_scripts[global_name])
 	_bind_scanned_properties()
+	_apply_deferred()
 
 
 func configuration(script: GDScript) -> Object:
@@ -217,7 +225,11 @@ func _scan(script: GDScript) -> void:
 
 
 func _register_configuration(script: GDScript) -> void:
-	if not _conditions_match(script, "script"):
+	var decision := _gate(script, "script")
+	if decision == "skip":
+		return
+	if decision == "defer":
+		_deferred.append({"kind": "configuration", "script": script})
 		return
 	if not script.can_instantiate():
 		push_error("IOC: configuration %s cannot be constructed." % _script_name(script))
@@ -256,8 +268,11 @@ func _bind_scanned_properties() -> void:
 		var script := _scripts[global_name] as GDScript
 		if script == null or not AnnotationUtils.has_annotation(script, ConfigurationProperties):
 			continue
+		if _property_seen.has(script.resource_path):
+			continue
 		if not _under_property_root(script):
 			continue
+		_property_seen[script.resource_path] = true
 		_register_property_product(script)
 
 
@@ -271,7 +286,11 @@ func _under_property_root(script: GDScript) -> bool:
 
 
 func _register_property_product(script: GDScript) -> void:
-	if not _conditions_match(script, "script"):
+	var decision := _gate(script, "script")
+	if decision == "skip":
+		return
+	if decision == "defer":
+		_deferred.append({"kind": "property", "script": script})
 		return
 	if _class_product(script) != null:
 		push_error("IOC: %s is @Component and @ConfigurationProperties." % _script_name(script))
@@ -325,7 +344,11 @@ func _take_configuration_component(annotation: Object, target: Object, bucket: D
 		if info.is_static:
 			push_error("IOC: %s.%s is static. Factory methods are called on the configuration instance." % [_script_name(script), info.name])
 			return
-		if not _conditions_match(script, "func", info.name):
+		var decision := _gate(script, "func", info.name)
+		if decision == "skip":
+			return
+		if decision == "defer":
+			_deferred.append({"kind": "method", "script": script, "factory": bucket["factory"], "method": info.name})
 			return
 		_register_method(script, bucket["factory"], info.name)
 		return
@@ -347,7 +370,11 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 
 
 func _register_class_product(script: GDScript) -> void:
-	if not _conditions_match(script, "script"):
+	var decision := _gate(script, "script")
+	if decision == "skip":
+		return
+	if decision == "defer":
+		_deferred.append({"kind": "class", "script": script})
 		return
 	if not script.can_instantiate():
 		push_error("IOC: component %s cannot be constructed." % _script_name(script))
@@ -361,15 +388,74 @@ func _register_class_product(script: GDScript) -> void:
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
 
 
-func _conditions_match(script: GDScript, kind: String, member: StringName = &"") -> bool:
+func _apply_deferred() -> void:
+	# The snapshot is the definitions that do not themselves depend on the
+	# registry. Later deferred products stay out of it, so scan order cannot
+	# decide, and a default cannot count itself.
+	var pending: Array = _deferred.duplicate()
+	_deferred.clear()
+	_registry_scripts = _product_scripts(definitions)
+	_applying_deferred = true
+	for item in pending:
+		var script := item.get("script") as GDScript
+		if script == null:
+			continue
+		match String(item.get("kind", "")):
+			"class":
+				_register_class_product(script)
+			"method":
+				if _gate(script, "func", item["method"]) != "ready":
+					continue
+				_register_method(script, item["factory"], item["method"])
+			"configuration":
+				_register_configuration(script)
+			"property":
+				_register_property_product(script)
+	# A configuration accepted above may have added a property scan root.
+	_bind_scanned_properties()
+	_applying_deferred = false
+	_registry_scripts = []
+
+
+func _product_scripts(source: Array) -> Array:
+	var scripts: Array = []
+	for definition in source:
+		var product := definition as ComponentDefinition
+		if product != null and product.type != null:
+			scripts.append(product.type)
+	return scripts
+
+
+func _gate(script: GDScript, kind: String, member: StringName = &"") -> String:
+	var found := _conditions(script, kind, member)
+	var registry := false
+	for annotation in found:
+		var condition := annotation as Condition
+		if condition == null:
+			return "skip"
+		if condition.depends_on_registry():
+			registry = true
+			continue
+		if not condition.matches(environment):
+			return "skip"
+	if registry and not _applying_deferred:
+		return "defer"
+	if registry:
+		for annotation in found:
+			var condition := annotation as Condition
+			if condition == null or not condition.depends_on_registry():
+				continue
+			condition.registry = _registry_scripts
+			if not condition.matches(environment):
+				return "skip"
+	return "ready"
+
+
+func _conditions(script: GDScript, kind: String, member: StringName) -> Array:
 	var found: Array = []
 	var bucket := {"kind": kind, "member": member, "found": found}
 	AnnotationUtils.for_each_annotation_initialized(Condition, script, _take_condition.bind(bucket))
-	for annotation in found:
-		var condition := annotation as Condition
-		if condition == null or not condition.matches(environment):
-			return false
-	return true
+	return found
 
 
 func _take_condition(annotation: Object, target: Object, bucket: Dictionary) -> void:

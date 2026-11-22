@@ -98,6 +98,10 @@ func _ready() -> void:
 	_check(lines, not _has_label(box, "MissingAddonBanner") and not _has_label(box, "NativeMissingBanner") and not _has_label(box, "HalfClasses") and not _has_label(box, "ScriptMissingBanner"), "a missing class skips the component, and a present class skips the missing-class fallback")
 	_check(lines, box.resolve(NativeGate) != null and box.resolve(FallbackGate) != null and not _has_label(box, "ClassFactory.addon_gate"), "a class name gates the factory method")
 	_check(lines, box.configuration(AbsentNodeFactory) == null and not _has_label(box, "AbsentNodeFactory.ghost") and not _has_label(box, "HiddenClassAudio"), "a failed class condition skips the configuration and the settings object")
+	_check(lines, box.resolve(Jukebox) == box.resolve(Orchestra) and box.resolve(JukeboxReady) != null and box.resolve(DefaultSpare) == box.resolve(SpareClock) and box.resolve(BothComponents) != null and box.resolve(OpenJukebox) != null, "a registered component gates the condition, and a default does not count itself")
+	_check(lines, not _has_label(box, "DefaultJukebox") and not _has_label(box, "SpareReady") and not _has_label(box, "HalfComponents") and not _has_label(box, "GatedSpare") and not _has_label(box, "MissingTypeBanner") and not _has_label(box, "MissingTypeFallback"), "a present component skips the default, and a deferred component does not satisfy another condition")
+	_check(lines, box.resolve(JukeboxGate) != null and box.resolve(SpareFallback) != null and not _has_label(box, "ComponentFactory.spare_gate"), "a component condition gates the factory method")
+	_check(lines, box.configuration(ClosedComponentFactory) == null and not _has_label(box, "ClosedComponentFactory.ghost") and not _has_label(box, "HiddenComponentAudio") and box.resolve(JukeboxAudio) != null, "a failed component condition skips the configuration and the settings object")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):
