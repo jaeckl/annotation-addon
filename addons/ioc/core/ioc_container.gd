@@ -44,6 +44,8 @@ var _scene_input: Dictionary = {}
 var _app_actions: Array = []
 var _scene_actions: Dictionary = {}
 var _input_driver: UnhandledInputDriver
+var _signal_links: Array = []
+var _signal_ready: Array = []
 var _publishing: Array = []
 var _async_inflight: Dictionary = {}
 var _async_jobs: Array = []
@@ -85,6 +87,7 @@ func setup(tree: SceneTree) -> void:
 func shutdown() -> void:
 	if _tree == null:
 		return
+	_drop_signal_links(-1)
 	if _tree.node_added.is_connected(_on_node_added):
 		_tree.node_added.disconnect(_on_node_added)
 	if _tree.node_removed.is_connected(_on_node_removed):
@@ -286,6 +289,7 @@ func _on_node_removed(node: Node) -> void:
 	_scene_physics.erase(scene_id)
 	_scene_input.erase(scene_id)
 	_scene_actions.erase(scene_id)
+	_drop_signal_links(scene_id)
 	_open_scenes.erase(scene_id)
 	_cancel_scene_async(scene_id)
 
@@ -504,6 +508,7 @@ func _remember(definition: ComponentDefinition, instance: Object) -> void:
 	_store_ticks(instance, scene_id, report)
 	_store_input(instance, scene_id, report)
 	_store_actions(instance, scene_id, report)
+	_arm_signals(instance, scene_id, report)
 	if scene_id != 0:
 		var bucket: Dictionary = _scene_instances.get(scene_id, {})
 		bucket[definition] = instance
@@ -1150,6 +1155,342 @@ func _reject_configuration_action(annotation: Object, target: Object, bucket: Di
 	push_error("IOC: @InputAction on %s belongs on a method." % _script_name(script))
 
 
+## Connects @SignalListener marks on a published Node component. An empty
+## path is the component. A path is resolved after _ready, so a child added
+## there is present. A returned Event is published with this component as
+## the source node.
+func _arm_signals(instance: Object, scene_id: int, report: bool) -> void:
+	if not (instance is Node):
+		return
+	var node := instance as Node
+	var script := node.get_script() as GDScript
+	var records: Array = []
+	for mark in _collect_signals(script, report):
+		var record: Dictionary = mark.duplicate()
+		record["instance"] = node
+		records.append(record)
+	if records.is_empty():
+		return
+	if node.is_node_ready():
+		for record in records:
+			_connect_signal(node, record, scene_id)
+		return
+	# One watcher for every mark. Bound callables compare equal, so a second
+	# ready connection on this node is rejected by the engine.
+	var watcher := _connect_ready_signals.bind(node, records, scene_id)
+	node.ready.connect(watcher, CONNECT_ONE_SHOT)
+	_signal_ready.append({
+		"node": node,
+		"callable": watcher,
+		"scene_id": scene_id,
+	})
+
+
+func _connect_ready_signals(node: Node, records: Array, scene_id: int) -> void:
+	for record in records:
+		_connect_signal(node, record, scene_id)
+
+
+func _connect_signal(node: Node, record: Dictionary, scene_id: int) -> void:
+	if not is_instance_valid(node):
+		return
+	var signal_name := StringName(String(record.get("signal_name", "")))
+	var path := record.get("path") as NodePath
+	var source := node
+	if path != null and not path.is_empty():
+		source = node.get_node_or_null(path)
+		if source == null:
+			push_error("IOC: %s.%s path \"%s\" is missing." % [_signal_script_name(record), record.get("method"), path])
+			return
+	var info := _find_signal(source, signal_name)
+	if info.is_empty():
+		push_error("IOC: %s.%s signal \"%s\" is missing." % [_signal_script_name(record), record.get("method"), signal_name])
+		return
+	var signal_args: Array = info.get("args", [])
+	var method_args := _method_args(node.get_script(), StringName(String(record.get("method", ""))))
+	if not _signal_args_match(method_args, signal_args):
+		push_error("IOC: %s.%s must match signal \"%s\"." % [_signal_script_name(record), record.get("method"), signal_name])
+		return
+	if signal_args.size() > 5:
+		push_error("IOC: %s.%s signal \"%s\" has too many arguments." % [_signal_script_name(record), record.get("method"), signal_name])
+		return
+	var relay := _signal_relay(signal_args.size(), record)
+	if source.is_connected(signal_name, relay):
+		return
+	var error := source.connect(signal_name, relay)
+	if error != OK:
+		push_error("IOC: %s.%s could not connect \"%s\"." % [_signal_script_name(record), record.get("method"), signal_name])
+		return
+	_signal_links.append({
+		"source": source,
+		"signal_name": signal_name,
+		"callable": relay,
+		"scene_id": scene_id,
+	})
+
+
+func _signal_relay(argc: int, record: Dictionary) -> Callable:
+	match argc:
+		0:
+			return _relay0.bind(record)
+		1:
+			return _relay1.bind(record)
+		2:
+			return _relay2.bind(record)
+		3:
+			return _relay3.bind(record)
+		4:
+			return _relay4.bind(record)
+		_:
+			return _relay5.bind(record)
+
+
+func _relay0(record: Dictionary) -> void:
+	_finish_signal([], record)
+
+
+func _relay1(a: Variant, record: Dictionary) -> void:
+	_finish_signal([a], record)
+
+
+func _relay2(a: Variant, b: Variant, record: Dictionary) -> void:
+	_finish_signal([a, b], record)
+
+
+func _relay3(a: Variant, b: Variant, c: Variant, record: Dictionary) -> void:
+	_finish_signal([a, b, c], record)
+
+
+func _relay4(a: Variant, b: Variant, c: Variant, d: Variant, record: Dictionary) -> void:
+	_finish_signal([a, b, c, d], record)
+
+
+func _relay5(a: Variant, b: Variant, c: Variant, d: Variant, e: Variant, record: Dictionary) -> void:
+	_finish_signal([a, b, c, d, e], record)
+
+
+func _finish_signal(args: Array, record: Dictionary) -> void:
+	var instance: Object = record.get("instance")
+	if instance == null or not is_instance_valid(instance):
+		return
+	var result: Variant = instance.callv(StringName(String(record.get("method", ""))), args)
+	if _is_suspended(result):
+		push_error("IOC: %s.%s cannot await." % [_signal_script_name(record), record.get("method")])
+		return
+	if result == null:
+		return
+	if not (result is Event):
+		push_error("IOC: %s.%s returned %s, not an Event." % [_signal_script_name(record), record.get("method"), type_string(typeof(result))])
+		return
+	publish_event(result, instance as Node)
+
+
+func _drop_signal_links(scene_id: int) -> void:
+	var links: Array = []
+	for link in _signal_links:
+		if scene_id >= 0 and int(link.get("scene_id", 0)) != scene_id:
+			links.append(link)
+			continue
+		var source: Object = link.get("source")
+		var callable: Callable = link.get("callable")
+		var signal_name := StringName(String(link.get("signal_name", "")))
+		if source is Node and is_instance_valid(source) and source.is_connected(signal_name, callable):
+			source.disconnect(signal_name, callable)
+	var waiting: Array = []
+	for link in _signal_ready:
+		if scene_id >= 0 and int(link.get("scene_id", 0)) != scene_id:
+			waiting.append(link)
+			continue
+		var node: Object = link.get("node")
+		var callable: Callable = link.get("callable")
+		if node is Node and is_instance_valid(node) and node.ready.is_connected(callable):
+			node.ready.disconnect(callable)
+	if scene_id < 0:
+		_signal_links.clear()
+		_signal_ready.clear()
+		return
+	_signal_links = links
+	_signal_ready = waiting
+
+
+func _collect_signals(script: GDScript, report: bool) -> Array:
+	var found: Array = []
+	if script == null:
+		return found
+	if not _is_node_script(script):
+		if report:
+			_reject_signals_on_non_node(script)
+		return found
+	var current := script
+	while current != null:
+		var bucket := {"script": current, "found": found, "report": report}
+		AnnotationUtils.for_each_annotation_initialized(SignalListener, current, _take_signal.bind(bucket))
+		current = current.get_base_script()
+	return found
+
+
+func _take_signal(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	var report: bool = bucket["report"]
+	if not (target is FunctionInfo):
+		if report:
+			push_error("IOC: @SignalListener on %s belongs on a method." % _script_name(script))
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		if report:
+			push_error("IOC: %s.%s is static and cannot listen to a signal." % [_script_name(script), info.name])
+		return
+	var signal_name := String(annotation.get("signal_name")).strip_edges()
+	if signal_name.is_empty():
+		if report:
+			push_error("IOC: %s.%s needs a signal." % [_script_name(script), info.name])
+		return
+	if not _signal_return_ok(script, info.name):
+		if report:
+			push_error("IOC: %s.%s must return an Event or nothing." % [_script_name(script), info.name])
+		return
+	var path := NodePath()
+	var raw: Variant = annotation.get("path")
+	if raw is NodePath:
+		path = raw
+	if path.is_empty():
+		var signal_info := _find_signal(script, StringName(signal_name))
+		if signal_info.is_empty():
+			if report:
+				push_error("IOC: %s.%s signal \"%s\" is missing." % [_script_name(script), info.name, signal_name])
+			return
+		if not _signal_args_match(_method_args(script, info.name), signal_info.get("args", [])):
+			if report:
+				push_error("IOC: %s.%s must match signal \"%s\"." % [_script_name(script), info.name, signal_name])
+			return
+	bucket["found"].append({
+		"method": info.name,
+		"signal_name": signal_name,
+		"path": path,
+		"script": script,
+	})
+
+
+func _reject_signals_on_non_node(script: GDScript) -> void:
+	var bucket := {"script": script, "base": String(script.get_instance_base_type())}
+	AnnotationUtils.for_each_annotation_initialized(SignalListener, script, _take_non_node_signal.bind(bucket))
+
+
+func _take_non_node_signal(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @SignalListener on a %s." % [_script_name(script), info.name, bucket.get("base", "?")])
+		return
+	push_error("IOC: @SignalListener on %s belongs on a method." % _script_name(script))
+
+
+func _reject_configuration_signals(script: GDScript) -> void:
+	var bucket := {"script": script}
+	AnnotationUtils.for_each_annotation_initialized(SignalListener, script, _take_configuration_signal.bind(bucket))
+
+
+func _take_configuration_signal(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @SignalListener on a configuration. Put it on a component." % [_script_name(script), info.name])
+		return
+	push_error("IOC: @SignalListener on %s belongs on a method." % _script_name(script))
+
+
+func _reject_loose_signals(script: GDScript) -> void:
+	var bucket := {"script": script}
+	AnnotationUtils.for_each_annotation_initialized(SignalListener, script, _take_loose_signal.bind(bucket))
+
+
+func _take_loose_signal(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @SignalListener and %s is not a Node component." % [_script_name(script), info.name, _script_name(script)])
+		return
+	push_error("IOC: @SignalListener on %s belongs on a method." % _script_name(script))
+
+
+func _find_signal(owner: Object, signal_name: StringName) -> Dictionary:
+	var script: GDScript = null
+	var native := &""
+	if owner is GDScript:
+		script = owner as GDScript
+		native = script.get_instance_base_type()
+	elif owner is Node:
+		var node := owner as Node
+		script = node.get_script() as GDScript
+		native = StringName(node.get_class())
+		if script != null:
+			native = script.get_instance_base_type()
+	var current := script
+	while current != null:
+		for info in current.get_script_signal_list():
+			if StringName(String(info.get("name", ""))) == signal_name:
+				return info
+		current = current.get_base_script()
+	if native != &"" and ClassDB.class_exists(native) and ClassDB.class_has_signal(native, signal_name):
+		return ClassDB.class_get_signal(native, signal_name)
+	return {}
+
+
+func _signal_args_match(method_args: Array, signal_args: Array) -> bool:
+	if method_args.size() != signal_args.size():
+		return false
+	for index in method_args.size():
+		if not _signal_arg_accepts(method_args[index], signal_args[index]):
+			return false
+	return true
+
+
+func _signal_arg_accepts(method_arg: Dictionary, signal_arg: Dictionary) -> bool:
+	var method_type := int(method_arg.get("type", TYPE_NIL))
+	if method_type == TYPE_NIL:
+		return true
+	var signal_type := int(signal_arg.get("type", TYPE_NIL))
+	if signal_type == TYPE_NIL:
+		return true
+	if method_type != signal_type:
+		return false
+	if method_type != TYPE_OBJECT:
+		return true
+	var method_class := String(method_arg.get("class_name", ""))
+	var signal_class := String(signal_arg.get("class_name", ""))
+	if method_class.is_empty() or signal_class.is_empty() or method_class == signal_class:
+		return true
+	if ClassDB.class_exists(signal_class) and ClassDB.class_exists(method_class):
+		return ClassDB.is_parent_class(signal_class, method_class)
+	var method_script := _scripts.get(method_class) as GDScript
+	var signal_script := _scripts.get(signal_class) as GDScript
+	if method_script != null and signal_script != null:
+		return signal_script == method_script or _extends_script(signal_script, method_script)
+	return false
+
+
+func _signal_return_ok(script: GDScript, method: StringName) -> bool:
+	for info in script.get_script_method_list():
+		if StringName(String(info.get("name", ""))) != method:
+			continue
+		var returned: Dictionary = info.get("return", {})
+		var type_code := int(returned.get("type", TYPE_NIL))
+		if type_code == TYPE_NIL:
+			return true
+		if type_code != TYPE_OBJECT:
+			return false
+		var type_name := String(returned.get("class_name", ""))
+		if type_name.is_empty():
+			type_name = String(returned.get("hint_string", ""))
+		return _is_event(_script_from_type(TYPE_OBJECT, StringName(type_name)))
+	return true
+
+
+func _signal_script_name(record: Dictionary) -> String:
+	return _script_name(record.get("script") as GDScript)
+
+
 func _reject_misplaced_async(script: GDScript) -> void:
 	AnnotationUtils.for_each_annotation_initialized(Async, script, _take_async.bind(script))
 
@@ -1189,6 +1530,7 @@ func _scan(script: GDScript) -> void:
 		_register_class_product(script)
 		return
 	_reject_orphan_methods(script)
+	_reject_loose_signals(script)
 
 
 func _register_configuration(script: GDScript) -> void:
@@ -1207,6 +1549,7 @@ func _register_configuration(script: GDScript) -> void:
 	_reject_configuration_ticks(script)
 	_reject_configuration_input(script)
 	_reject_configuration_actions(script)
+	_reject_configuration_signals(script)
 	_collect_property_roots(script)
 	var bucket := {"script": script, "factory": factory}
 	AnnotationUtils.for_each_annotation_initialized(Component, script, _take_configuration_component.bind(bucket))
@@ -1275,6 +1618,7 @@ func _register_property_product(script: GDScript) -> void:
 	_collect_ticks(script, true)
 	_collect_input(script, true)
 	_collect_actions(script, true)
+	_collect_signals(script, true)
 	_add_definition(script, [], _script_name(script), script, null, &"", [], [])
 	_remember(_newest_definition(), instance)
 
@@ -1333,6 +1677,7 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 	_collect_ticks(return_script, true)
 	_collect_input(return_script, true)
 	_collect_actions(return_script, true)
+	_collect_signals(return_script, true)
 	_add_definition(return_script, _qualifiers(script, "func", method, &""), "%s.%s" % [_script_name(script), method], script, factory, method, parameters, fields)
 
 
@@ -1353,6 +1698,7 @@ func _register_class_product(script: GDScript) -> void:
 	_collect_ticks(script, true)
 	_collect_input(script, true)
 	_collect_actions(script, true)
+	_collect_signals(script, true)
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
 	_record_advice(script)
 
