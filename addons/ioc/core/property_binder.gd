@@ -2,9 +2,15 @@ class_name PropertyBinder
 extends RefCounted
 
 ## Writes PropertyEnvironment into @export fields. A missing key keeps the
-## field default. An extra key is ignored. int may fill a float. Any other
-## type mismatch fails the whole object. Only int, float, bool, and String
-## are accepted.
+## field default. An extra key is ignored. converters is walked in order.
+## The first PropertyConverter that accepts the value produces the stored
+## value. A result of the wrong type fails the whole object. Only int,
+## float, bool, and String fields are accepted.
+var converters: Array = []
+
+
+func _init() -> void:
+	converters = [ScalarPropertyConverter.new()]
 
 
 func bind(instance: Object, prefix: String, environment: PropertyEnvironment) -> bool:
@@ -31,28 +37,29 @@ func bind(instance: Object, prefix: String, environment: PropertyEnvironment) ->
 		if not environment.contains(key):
 			continue
 		var value: Variant = environment.get_value(key)
-		if not _fits(type_code, value):
-			push_error("IOC: %s.%s cannot take %s for %s." % [_script_name(script), property_name, type_string(typeof(value)), type_string(type_code)])
+		var converted := _convert(script, property_name, type_code, value)
+		if not converted["ok"]:
 			return false
-		instance.set(StringName(property_name), _coerce(type_code, value))
+		instance.set(StringName(property_name), converted["value"])
 	return true
+
+
+func _convert(script: GDScript, property_name: String, type_code: int, value: Variant) -> Dictionary:
+	for converter in converters:
+		var candidate := converter as PropertyConverter
+		if candidate == null or not candidate.handles(type_code, value):
+			continue
+		var converted: Variant = candidate.convert(type_code, value)
+		if typeof(converted) != type_code:
+			push_error("IOC: %s.%s converter %s produced %s for %s." % [_script_name(script), property_name, _script_name(candidate.get_script()), type_string(typeof(converted)), type_string(type_code)])
+			return {"ok": false}
+		return {"ok": true, "value": converted}
+	push_error("IOC: %s.%s cannot take %s for %s." % [_script_name(script), property_name, type_string(typeof(value)), type_string(type_code)])
+	return {"ok": false}
 
 
 func _supported(type_code: int) -> bool:
 	return type_code == TYPE_INT or type_code == TYPE_FLOAT or type_code == TYPE_BOOL or type_code == TYPE_STRING
-
-
-func _fits(type_code: int, value: Variant) -> bool:
-	var value_type := typeof(value)
-	if type_code == TYPE_FLOAT and value_type == TYPE_INT:
-		return true
-	return value_type == type_code
-
-
-func _coerce(type_code: int, value: Variant) -> Variant:
-	if type_code == TYPE_FLOAT:
-		return float(value)
-	return value
 
 
 func _script_name(script: GDScript) -> String:

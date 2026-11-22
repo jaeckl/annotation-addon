@@ -8,4 +8,8 @@ extends Resource
 @export var music: String = "silent"
 @export var channels: int = 8
 @export var subtitle: String = "none"
+@export var gain: float = 0.0
+@export var muted: bool = true
+@export var loops: int = 0
+@export var pace: int = 0
 var leaked := "keep"

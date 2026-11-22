@@ -399,9 +399,9 @@ This slice loads `res://config/*.cfg` through `ConfigFile`. Each entry is `secti
 
 ProjectSettings, the OS environment, and the command line sit above the files, in that order, with the command line at index 0. `ProjectSettings` uses the same `section/key`. `AUDIO_MASTER` matches `audio/master`, and the value stays the raw string. `--audio/master=0.2` after `--` is a command-line entry. A key none of these set still falls through to the cfg files.
 
-A `PropertyConverter` is the next slice. It sits on the binder, between the raw value and the field write. The binder asks an ordered list. The first converter that accepts the target type and the value produces the stored value. A custom converter is a subclass added to that list, the same kind of policy as `PropertySourceParser`. Settings objects do not take converters through `@Inject`. Binding runs at the end of discover, before gameplay objects exist. Until that slice, a String from the OS or the command line only fills a String field. An `int` may still fill a `float`.
+The binder holds an ordered `PropertyConverter` list. The first converter whose `handles` returns true produces the stored value. A result of the wrong type fails the product. `ScalarPropertyConverter` is always last. It passes a matching type through, fills a float from an int, and parses a whole string into an int, a float, or a bool. `"true"` and `"false"` are the only bool spellings. The container installs every other concrete global subclass of `PropertyConverter` in front of that fallback. `PaceConverter` maps `"slow"` and `"fast"` onto an int, which the scalar converter leaves alone. A settings object does not receive a converter through `@Inject`.
 
-A `.tres` source is the lowest layer after converters. `@ConditionalOnProperty` comes after the sources and calls `environment.get_value` during registration.
+A `.tres` source is the lowest layer. `@ConditionalOnProperty` comes after the sources and calls `environment.get_value` during registration.
 
 ## Out of this plan
 

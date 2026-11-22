@@ -28,6 +28,7 @@ func setup(tree: SceneTree) -> void:
 	app_scope.setup(tree)
 	environment = PropertyEnvironment.new()
 	binder = PropertyBinder.new()
+	_install_converters()
 	parsers = [ConfigFilePropertySourceParser.new()]
 	_load_config_directory("res://config")
 	# Files are already ordered. Each add_first beats them. The last add
@@ -37,6 +38,36 @@ func setup(tree: SceneTree) -> void:
 	environment.add_first(CommandLinePropertySource.new())
 	if not tree.node_added.is_connected(_on_node_added):
 		tree.node_added.connect(_on_node_added)
+
+
+func _install_converters() -> void:
+	# The scalar converter stays last. Every other global subclass is
+	# inserted in front of it, so a custom spelling wins.
+	for entry in ProjectSettings.get_global_class_list():
+		if String(entry.get("language", "")) != "GDScript":
+			continue
+		var script := load(String(entry.get("path", ""))) as GDScript
+		if script == null or script == PropertyConverter or script == ScalarPropertyConverter:
+			continue
+		if not _extends_script(script, PropertyConverter):
+			continue
+		if not script.can_instantiate():
+			push_error("IOC: converter %s cannot be constructed." % _script_name(script))
+			continue
+		var converter: Object = script.callv(&"new", [])
+		if converter == null:
+			push_error("IOC: converter %s produced null." % _script_name(script))
+			continue
+		binder.converters.insert(binder.converters.size() - 1, converter)
+
+
+func _extends_script(script: GDScript, base: GDScript) -> bool:
+	var current := script.get_base_script()
+	while current != null:
+		if current == base:
+			return true
+		current = current.get_base_script()
+	return false
 
 
 func _load_config_directory(root: String) -> void:

@@ -76,6 +76,9 @@ func _ready() -> void:
 	_check(lines, not settings.contains("audio/missing"), "absent key is missing")
 	_check(lines, party.audio != null and party.audio == box.resolve(AudioSettings) and is_equal_approx(party.audio.master, 0.8) and party.audio.music == music_track and party.audio.channels == 6 and party.audio.subtitle == "none" and party.audio.leaked == "keep", "@ConfigurationProperties keeps the winning value")
 	_check(lines, party.combat_options != null and party.combat_options.enabled and party.combat_options.title == combat_title, "RefCounted settings keep the winning combat/title")
+	_check(lines, _converter_order(box), "custom converter sits in front of the scalar converter")
+	_check(lines, typeof(settings.get_value("audio/gain")) == TYPE_STRING and typeof(settings.get_value("audio/muted")) == TYPE_STRING and typeof(settings.get_value("audio/loops")) == TYPE_STRING and typeof(settings.get_value("audio/pace")) == TYPE_STRING, "quoted cfg values stay strings")
+	_check(lines, party.audio != null and is_equal_approx(party.audio.gain, 1.5) and party.audio.muted == false and party.audio.loops == 3 and party.audio.pace == 2, "converters parse strings and the custom pace wins")
 	_check(lines, not _has_label(box, "BadAudio"), "type mismatch is not published")
 	_check(lines, not _has_label(box, "IgnoredSettings"), "settings outside the scan root are not registered")
 	failed = false
@@ -105,6 +108,16 @@ func _same_members(list: Variant, expected: Array) -> bool:
 		if not list.has(item):
 			return false
 	return true
+
+
+func _converter_order(box: IOCContainer) -> bool:
+	var converters := box.binder.converters
+	if converters.is_empty() or not (converters[converters.size() - 1] is ScalarPropertyConverter):
+		return false
+	for converter in converters:
+		if converter is PaceConverter:
+			return true
+	return false
 
 
 func _source_names(settings: PropertyEnvironment) -> PackedStringArray:
