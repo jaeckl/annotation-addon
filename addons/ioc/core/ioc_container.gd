@@ -34,6 +34,7 @@ var _active_scene_root: Node
 var _scene_bucket: Array = []
 var _app_listeners: Array = []
 var _scene_listeners: Dictionary = {}
+var _publishing: Array = []
 
 
 func setup(tree: SceneTree) -> void:
@@ -330,16 +331,19 @@ func publish_event(event: Event, from_node: Node = null) -> void:
 	if event_script == null or not _is_event(event_script):
 		push_error("IOC: publish needs an Event.")
 		return
-	_deliver(_app_listeners, event, event_script)
-	if from_node == null:
+	if _publishing.has(event_script):
+		push_error("IOC: publish of %s is already in progress." % _script_name(event_script))
 		return
-	var root := _scene_root_of(from_node)
-	if root == null:
-		return
-	_deliver(_scene_listeners.get(root.get_instance_id(), []), event, event_script)
+	_publishing.append(event_script)
+	_deliver(_app_listeners, event, event_script, from_node)
+	if from_node != null:
+		var root := _scene_root_of(from_node)
+		if root != null:
+			_deliver(_scene_listeners.get(root.get_instance_id(), []), event, event_script, from_node)
+	_publishing.pop_back()
 
 
-func _deliver(listeners: Array, event: Event, event_script: GDScript) -> void:
+func _deliver(listeners: Array, event: Event, event_script: GDScript, from_node: Node) -> void:
 	for record in listeners:
 		var wanted := record.get("type") as GDScript
 		if wanted == null:
@@ -349,7 +353,13 @@ func _deliver(listeners: Array, event: Event, event_script: GDScript) -> void:
 		var instance: Object = record.get("instance")
 		if instance == null or not is_instance_valid(instance):
 			continue
-		instance.call(record.get("method"), event)
+		var result: Variant = instance.call(record.get("method"), event)
+		if result == null:
+			continue
+		if not (result is Event):
+			push_error("IOC: %s.%s returned %s, not an Event." % [_script_name(instance.get_script()), record.get("method"), type_string(typeof(result))])
+			continue
+		publish_event(result, from_node)
 
 
 func _register_event_publisher() -> void:

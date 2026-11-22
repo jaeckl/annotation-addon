@@ -164,6 +164,8 @@ func _ready() -> void:
 	_check(lines, box.configuration(ClosedNodeFactory) == null and box.resolve(NodeGhost, [], self) == null and box.resolve(NodeGhost, [], camp) == null and box.resolve(PresentNodeAudio, [], self) != null and box.resolve(PresentNodeAudio, [], camp) == null and box.resolve(HiddenNodeAudio, [], self) == null, "a failed node condition skips the configuration and the settings object")
 	var health_desk := box.resolve(HealthDesk) as HealthDesk
 	var health_source := box.resolve(HealthSource) as HealthSource
+	var pace_desk := box.resolve(PaceDesk) as PaceDesk
+	box.resolve(PaceBridge)
 	if health_source != null:
 		health_source.raise(4)
 		health_source.raise_critical(1)
@@ -176,6 +178,23 @@ func _ready() -> void:
 		health_source.events.publish(HealthChanged.new(8), camp)
 		health_source.events.publish(HealthChanged.new(7))
 	_check(lines, demo_health != null and camp_health != null and demo_health != camp_health and demo_health.heard == 1 and camp_health.heard == 1, "a scene listener hears its own scene and skips an app publish")
+	if health_source != null:
+		health_source.events.publish(PaceChanged.new(5))
+	_check(lines, pace_desk != null and pace_desk.noted.size() == 1 and pace_desk.noted[0].current == 5, "a returned event is published")
+	var demo_ping := box.resolve(ScenePingBridge, [], self) as ScenePingBridge
+	var camp_ping := box.resolve(ScenePingBridge, [], camp) as ScenePingBridge
+	var pong_desk := box.resolve(PongDesk) as PongDesk
+	if health_source != null:
+		health_source.events.publish(ScenePing.new(), self)
+	_check(lines, demo_ping != null and camp_ping != null and pong_desk != null and demo_ping.heard == 1 and demo_ping.pong == 1 and camp_ping.heard == 0 and camp_ping.pong == 0 and pong_desk.heard == 1, "a returned event stays on the publishing scene")
+	box.resolve(LoopingHealth)
+	box.resolve(BadEventReturn)
+	var health_before := 0
+	if health_desk != null:
+		health_before = health_desk.health.size()
+	if health_source != null:
+		health_source.events.publish(HealthChanged.new(3))
+	_check(lines, health_desk != null and health_desk.health.size() == health_before + 1, "a listener that returns the same event type does not publish it again")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):
