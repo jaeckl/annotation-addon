@@ -53,6 +53,11 @@ var _advice: Array = []
 var _proxy_scripts: Dictionary = {}
 var _proxy_origin: Dictionary = {}
 var _advice_refused: Dictionary = {}
+var _pooled: Dictionary = {}
+var _pool_free: Dictionary = {}
+var _pool_live: Dictionary = {}
+var _pool_known: Dictionary = {}
+var _pool_moving := false
 
 
 func setup(tree: SceneTree) -> void:
@@ -88,6 +93,10 @@ func shutdown() -> void:
 	if _tree == null:
 		return
 	_drop_signal_links(-1)
+	_pooled.clear()
+	_pool_free.clear()
+	_pool_live.clear()
+	_pool_known.clear()
 	if _tree.node_added.is_connected(_on_node_added):
 		_tree.node_added.disconnect(_on_node_added)
 	if _tree.node_removed.is_connected(_on_node_removed):
@@ -176,6 +185,10 @@ func discover() -> void:
 	_proxy_scripts.clear()
 	_proxy_origin.clear()
 	_advice_refused.clear()
+	_pooled.clear()
+	_pool_free.clear()
+	_pool_live.clear()
+	_pool_known.clear()
 	for entry in ProjectSettings.get_global_class_list():
 		if String(entry.get("language", "")) != "GDScript":
 			continue
@@ -184,6 +197,7 @@ func discover() -> void:
 			continue
 		_scripts[String(entry.get("class", ""))] = script
 	_register_event_publisher()
+	_register_instance_pools()
 	for global_name in _scripts:
 		_scan(_scripts[global_name])
 	_bind_scanned_properties()
@@ -198,6 +212,9 @@ func configuration(script: GDScript) -> Object:
 func resolve(type: GDScript, qualifiers: Array = [], from_node: Node = null) -> Object:
 	if type == null:
 		push_error("IOC: resolve needs a script.")
+		return null
+	if _pooled.has(type):
+		push_error("IOC: %s is pooled. Borrow it." % _script_name(type))
 		return null
 	var found: Array = selector.select(_visible_definitions(from_node), type, qualifiers)
 	if found.size() != 1:
@@ -262,6 +279,12 @@ func _on_node_added(node: Node) -> void:
 	var script := node.get_script() as GDScript
 	if script == null:
 		return
+	var origin := _proxy_origin.get(script, script) as GDScript
+	if _pooled.has(origin):
+		if _pool_known.has(node.get_instance_id()):
+			return
+		push_error("IOC: %s is in a scene and is also @Pooled. The container would create a second instance." % _script_name(origin))
+		return
 	var product := _class_product(script)
 	if product != null:
 		if app_scope.fetch(product) == node:
@@ -290,6 +313,7 @@ func _on_node_removed(node: Node) -> void:
 	_scene_input.erase(scene_id)
 	_scene_actions.erase(scene_id)
 	_drop_signal_links(scene_id)
+	_drop_scene_pool(scene_id)
 	_open_scenes.erase(scene_id)
 	_cancel_scene_async(scene_id)
 
@@ -498,6 +522,187 @@ func _register_event_publisher() -> void:
 	publisher.container = self
 	_add_definition(script, [], "EventPublisher", script, null, &"", [], [])
 	_remember(_newest_definition(), publisher)
+
+
+func _register_instance_pools() -> void:
+	var script := _scripts.get("InstancePools") as GDScript
+	if script == null:
+		push_error("IOC: InstancePools is missing.")
+		return
+	var pools := InstancePools.new()
+	pools.container = self
+	_add_definition(script, [], "InstancePools", script, null, &"", [], [])
+	_remember(_newest_definition(), pools)
+
+
+func borrow_pooled(type: GDScript, parent: Node) -> Object:
+	if type == null:
+		push_error("IOC: borrow needs a class.")
+		return null
+	if parent == null:
+		push_error("IOC: borrow needs a parent.")
+		return null
+	var definition := _pooled.get(type) as ComponentDefinition
+	if definition == null:
+		push_error("IOC: %s is not pooled." % _script_name(type))
+		return null
+	var root := _scene_root_of(parent)
+	if root == null:
+		push_error("IOC: borrow needs a scene.")
+		return null
+	var scene_id := root.get_instance_id()
+	var instance: Object = _take_parked(scene_id, type)
+	if instance == null:
+		instance = _construct(definition, parent)
+		if instance == null:
+			return null
+		if not _inject_fields(instance, definition, parent):
+			if instance is Node and is_instance_valid(instance):
+				(instance as Node).free()
+			return null
+		_watch_pooled(instance, type, scene_id)
+	_pool_live[instance.get_instance_id()] = instance
+	_place_pooled(instance, parent)
+	return instance
+
+
+func release_pooled(instance: Object) -> void:
+	if instance == null or not is_instance_valid(instance):
+		push_error("IOC: release needs an instance.")
+		return
+	var id := instance.get_instance_id()
+	if not _pool_live.has(id):
+		push_error("IOC: %s is not borrowed." % _pooled_name(instance))
+		return
+	_pool_live.erase(id)
+	var meta: Dictionary = _pool_known.get(id, {})
+	var scene_id := int(meta.get("scene_id", -1))
+	var script := meta.get("script") as GDScript
+	var root := _open_scenes.get(scene_id) as Node
+	if root == null or not is_instance_valid(root) or script == null:
+		_forget_pooled(instance)
+		if instance is Node and is_instance_valid(instance):
+			(instance as Node).queue_free()
+		return
+	if instance is Node:
+		_park_node(instance as Node, root)
+	var waiting := _free_list(scene_id, script)
+	waiting.append(instance)
+
+
+func _take_parked(scene_id: int, script: GDScript) -> Object:
+	var waiting := _free_list(scene_id, script)
+	while waiting.size() > 0:
+		var instance: Object = waiting.pop_back()
+		if instance != null and is_instance_valid(instance):
+			return instance
+	return null
+
+
+func _place_pooled(instance: Object, parent: Node) -> void:
+	if not (instance is Node):
+		return
+	var node := instance as Node
+	if not is_instance_valid(node):
+		return
+	node.process_mode = Node.PROCESS_MODE_INHERIT
+	if node is CanvasItem:
+		(node as CanvasItem).visible = true
+	if node.get_parent() == parent:
+		return
+	_pool_moving = true
+	if node.get_parent() != null:
+		node.get_parent().remove_child(node)
+	parent.add_child(node)
+	_pool_moving = false
+
+
+func _park_node(node: Node, root: Node) -> void:
+	node.process_mode = Node.PROCESS_MODE_DISABLED
+	if node is CanvasItem:
+		(node as CanvasItem).visible = false
+	var park := _scene_park(root)
+	if node.get_parent() == park:
+		return
+	_pool_moving = true
+	if node.get_parent() != null:
+		node.get_parent().remove_child(node)
+	park.add_child(node)
+	_pool_moving = false
+
+
+func _scene_park(root: Node) -> Node:
+	var existing := root.get_node_or_null("IocPool")
+	if existing != null:
+		return existing
+	var park := Node.new()
+	park.name = "IocPool"
+	park.process_mode = Node.PROCESS_MODE_DISABLED
+	root.add_child(park)
+	return park
+
+
+func _free_list(scene_id: int, script: GDScript) -> Array:
+	var bucket: Dictionary = _pool_free.get(scene_id, {})
+	if not bucket.has(script):
+		bucket[script] = []
+		_pool_free[scene_id] = bucket
+	return bucket[script]
+
+
+func _watch_pooled(instance: Object, script: GDScript, scene_id: int) -> void:
+	var id := instance.get_instance_id()
+	_pool_known[id] = {"instance": instance, "script": script, "scene_id": scene_id}
+	if instance is Node:
+		var node := instance as Node
+		if not node.tree_exiting.is_connected(_on_pooled_exit):
+			node.tree_exiting.connect(_on_pooled_exit.bind(node))
+
+
+func _on_pooled_exit(node: Node) -> void:
+	if _pool_moving:
+		return
+	_forget_pooled(node)
+
+
+func _forget_pooled(instance: Object) -> void:
+	if instance == null:
+		return
+	var id := instance.get_instance_id()
+	var meta: Dictionary = _pool_known.get(id, {})
+	_pool_known.erase(id)
+	_pool_live.erase(id)
+	if meta.is_empty():
+		return
+	var scene_id := int(meta.get("scene_id", -1))
+	var script := meta.get("script") as GDScript
+	if script == null or not _pool_free.has(scene_id):
+		return
+	var bucket: Dictionary = _pool_free[scene_id]
+	var waiting: Array = bucket.get(script, [])
+	waiting.erase(instance)
+	bucket[script] = waiting
+
+
+func _drop_scene_pool(scene_id: int) -> void:
+	var drop: Array = []
+	for id in _pool_known.keys():
+		var meta: Dictionary = _pool_known[id]
+		if int(meta.get("scene_id", -1)) != scene_id:
+			continue
+		drop.append(meta.get("instance"))
+	for instance in drop:
+		_forget_pooled(instance)
+		if instance is Node and is_instance_valid(instance) and not (instance as Node).is_queued_for_deletion():
+			(instance as Node).queue_free()
+	_pool_free.erase(scene_id)
+
+
+func _pooled_name(instance: Object) -> String:
+	var script := instance.get_script() as GDScript
+	if script == null:
+		return "?"
+	return _script_name(_proxy_origin.get(script, script) as GDScript)
 
 
 func _remember(definition: ComponentDefinition, instance: Object) -> void:
@@ -1523,14 +1728,63 @@ func _class_product(script: GDScript) -> ComponentDefinition:
 func _scan(script: GDScript) -> void:
 	_reject_misplaced_async(script)
 	_reject_misplaced_advice(script)
+	_reject_misplaced_pooled(script)
 	if AnnotationUtils.has_annotation(script, Configuration):
+		if AnnotationUtils.has_annotation(script, Pooled):
+			push_error("IOC: %s is @Pooled on a configuration." % _script_name(script))
 		_register_configuration(script)
 		return
 	if AnnotationUtils.has_annotation(script, Component):
+		if AnnotationUtils.has_annotation(script, Pooled):
+			_register_pooled(script)
+			return
 		_register_class_product(script)
 		return
+	if AnnotationUtils.has_annotation(script, Pooled):
+		push_error("IOC: %s is @Pooled without @Component." % _script_name(script))
 	_reject_orphan_methods(script)
 	_reject_loose_signals(script)
+
+
+func _reject_misplaced_pooled(script: GDScript) -> void:
+	AnnotationUtils.for_each_annotation_initialized(Pooled, script, _take_pooled.bind(script))
+
+
+func _take_pooled(_annotation: Object, target: Object, script: GDScript) -> void:
+	if target is ScriptInfo:
+		return
+	push_error("IOC: @Pooled on %s belongs on a class." % _script_name(script))
+
+
+func _register_pooled(script: GDScript) -> void:
+	var decision := _gate(script, "script")
+	if decision == "scene":
+		push_error("IOC: %s is @Pooled and cannot wait for a scene." % _script_name(script))
+		return
+	if _postpone(decision, {"kind": "pooled", "script": script}):
+		return
+	if not script.can_instantiate():
+		push_error("IOC: component %s cannot be constructed." % _script_name(script))
+		return
+	var parameters := _parameters(script, &"_init")
+	if parameters == null:
+		return
+	var fields := _fields(script)
+	if fields == null:
+		return
+	_collect_listeners(script, true)
+	_collect_ticks(script, true)
+	_collect_input(script, true)
+	_collect_actions(script, true)
+	_collect_signals(script, true)
+	var definition := ComponentDefinition.new()
+	definition.type = script
+	definition.qualifiers = _qualifiers(script, "script", &"", &"")
+	definition.label = _script_name(script)
+	definition.owner_script = script
+	definition.parameters = parameters
+	definition.fields = fields
+	_pooled[script] = definition
 
 
 func _register_configuration(script: GDScript) -> void:
@@ -1726,6 +1980,8 @@ func _apply_deferred() -> void:
 				_register_configuration(script)
 			"property":
 				_register_property_product(script)
+			"pooled":
+				_register_pooled(script)
 	# A configuration accepted above may have added a property scan root.
 	_bind_scanned_properties()
 	_applying_deferred = false
