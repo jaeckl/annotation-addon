@@ -248,6 +248,8 @@ func _instance_of(definition: ComponentDefinition, from_node: Node = null) -> Ob
 	_creating.append(definition)
 	var instance := _construct(definition, from_node)
 	if instance != null and not _inject_fields(instance, definition, from_node):
+		if instance is Node and is_instance_valid(instance):
+			(instance as Node).free()
 		instance = null
 	if instance != null:
 		_remember(definition, instance)
@@ -293,7 +295,7 @@ func _on_node_added(node: Node) -> void:
 		return
 	var product := _class_product(script)
 	if product != null:
-		if app_scope.fetch(product) == node:
+		if _known_product(product, node):
 			return
 		push_error("IOC: %s is in a scene and is also @Component. The container would create a second instance." % _script_name(script))
 		return
@@ -1762,9 +1764,12 @@ func _scan(script: GDScript) -> void:
 	_reject_misplaced_advice(script)
 	_reject_misplaced_pooled(script)
 	_reject_misplaced_release(script)
+	_reject_misplaced_scene(script)
 	if AnnotationUtils.has_annotation(script, Configuration):
 		if AnnotationUtils.has_annotation(script, Pooled):
 			push_error("IOC: %s is @Pooled on a configuration." % _script_name(script))
+		if AnnotationUtils.has_annotation(script, Scene):
+			push_error("IOC: %s is @Scene on a configuration." % _script_name(script))
 		_register_configuration(script)
 		return
 	if AnnotationUtils.has_annotation(script, Component):
@@ -1775,12 +1780,86 @@ func _scan(script: GDScript) -> void:
 		return
 	if AnnotationUtils.has_annotation(script, Pooled):
 		push_error("IOC: %s is @Pooled without @Component." % _script_name(script))
+	if AnnotationUtils.has_annotation(script, Scene):
+		push_error("IOC: %s is @Scene without @Component." % _script_name(script))
 	_reject_orphan_methods(script)
 	_reject_loose_signals(script)
 
 
 func _reject_misplaced_pooled(script: GDScript) -> void:
 	AnnotationUtils.for_each_annotation_initialized(Pooled, script, _take_pooled.bind(script))
+
+
+func _known_product(product: ComponentDefinition, node: Node) -> bool:
+	if app_scope.fetch(product) == node:
+		return true
+	for scene_id in _scene_instances.keys():
+		var bucket: Dictionary = _scene_instances[scene_id]
+		if bucket.get(product) == node:
+			return true
+	return false
+
+
+func _reject_misplaced_scene(script: GDScript) -> void:
+	AnnotationUtils.for_each_annotation_initialized(Scene, script, _take_scene_mark.bind(script))
+
+
+func _take_scene_mark(_annotation: Object, target: Object, script: GDScript) -> void:
+	if target is ScriptInfo:
+		return
+	push_error("IOC: @Scene on %s belongs on a class." % _script_name(script))
+
+
+func _reject_scene_args(script: GDScript, parameters: Array) -> bool:
+	if not AnnotationUtils.has_annotation(script, Scene) or parameters.is_empty():
+		return false
+	push_error("IOC: %s is a scene and cannot take constructor arguments." % _script_name(script))
+	return true
+
+
+func _scene_pack(script: GDScript) -> Variant:
+	if not AnnotationUtils.has_annotation(script, Scene):
+		return false
+	if not _is_node_script(script):
+		push_error("IOC: %s is @Scene and is not a Node." % _script_name(script))
+		return null
+	var mark: Variant = AnnotationUtils.get_annotation_initialized(script, Scene)
+	var path := ""
+	if mark is Object:
+		path = String(mark.get("path"))
+	if path == "":
+		push_error("IOC: @Scene on %s needs a path." % _script_name(script))
+		return null
+	var loaded: Variant = load(path)
+	if not (loaded is PackedScene):
+		push_error("IOC: %s scene %s did not load." % [_script_name(script), path])
+		return null
+	var packed := loaded as PackedScene
+	if not _same_scene_script(_scene_root_script(packed), script):
+		push_error("IOC: %s scene root is not %s." % [_script_name(script), _script_name(script)])
+		return null
+	return packed
+
+
+func _scene_root_script(packed: PackedScene) -> GDScript:
+	var state := packed.get_state()
+	if state == null or state.get_node_count() == 0:
+		return null
+	for index in state.get_node_property_count(0):
+		if state.get_node_property_name(0, index) != &"script":
+			continue
+		return state.get_node_property_value(0, index) as GDScript
+	return null
+
+
+func _same_scene_script(root_script: GDScript, script: GDScript) -> bool:
+	if root_script == null:
+		return false
+	if root_script == script:
+		return true
+	var left := root_script.resource_path
+	var right := script.resource_path
+	return left != "" and left == right
 
 
 func _take_pooled(_annotation: Object, target: Object, script: GDScript) -> void:
@@ -1842,14 +1921,19 @@ func _register_pooled(script: GDScript) -> void:
 		return
 	if _postpone(decision, {"kind": "pooled", "script": script}):
 		return
-	if not script.can_instantiate():
-		push_error("IOC: component %s cannot be constructed." % _script_name(script))
-		return
 	var parameters := _parameters(script, &"_init")
 	if parameters == null:
 		return
+	if _reject_scene_args(script, parameters):
+		return
+	if not script.can_instantiate():
+		push_error("IOC: component %s cannot be constructed." % _script_name(script))
+		return
 	var fields := _fields(script)
 	if fields == null:
+		return
+	var packed := _scene_pack(script)
+	if packed == null:
 		return
 	_collect_listeners(script, true)
 	_collect_ticks(script, true)
@@ -1868,6 +1952,8 @@ func _register_pooled(script: GDScript) -> void:
 	definition.owner_script = script
 	definition.parameters = parameters
 	definition.fields = fields
+	if packed is PackedScene:
+		definition.packed = packed
 	_pooled[script] = definition
 
 
@@ -2023,14 +2109,19 @@ func _register_class_product(script: GDScript) -> void:
 	var decision := _gate(script, "script")
 	if _postpone(decision, {"kind": "class", "script": script}):
 		return
-	if not script.can_instantiate():
-		push_error("IOC: component %s cannot be constructed." % _script_name(script))
-		return
 	var parameters := _parameters(script, &"_init")
 	if parameters == null:
 		return
+	if _reject_scene_args(script, parameters):
+		return
+	if not script.can_instantiate():
+		push_error("IOC: component %s cannot be constructed." % _script_name(script))
+		return
 	var fields := _fields(script)
 	if fields == null:
+		return
+	var packed := _scene_pack(script)
+	if packed == null:
 		return
 	_collect_listeners(script, true)
 	_collect_ticks(script, true)
@@ -2038,6 +2129,8 @@ func _register_class_product(script: GDScript) -> void:
 	_collect_actions(script, true)
 	_collect_signals(script, true)
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
+	if packed is PackedScene:
+		_newest_definition().packed = packed
 	_record_advice(script)
 
 
@@ -2298,6 +2391,8 @@ func _construct(definition: ComponentDefinition, from_node: Node) -> Object:
 	var instance: Variant = null
 	if definition.factory != null:
 		instance = definition.factory.callv(definition.method, args)
+	elif definition.packed != null:
+		instance = definition.packed.instantiate()
 	else:
 		instance = _construct_woven(definition, args, from_node)
 		if instance == null:

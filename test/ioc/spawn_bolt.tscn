@@ -1,0 +1,10 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://test/ioc/spawn_bolt.gd" id="1_bolt"]
+[ext_resource type="Script" path="res://test/ioc/spawn_tip.gd" id="2_tip"]
+
+[node name="SpawnBolt" type="Node2D"]
+script = ExtResource("1_bolt")
+
+[node name="Tip" type="Node" parent="."]
+script = ExtResource("2_tip")
