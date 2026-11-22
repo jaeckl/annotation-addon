@@ -70,6 +70,7 @@ var _pool_known: Dictionary = {}
 var _pool_limit: Dictionary = {}
 var _pool_release: Dictionary = {}
 var _pool_moving := false
+var _hooks: Array = []
 
 
 func setup(tree: SceneTree) -> void:
@@ -210,6 +211,7 @@ func discover() -> void:
 	_pool_known.clear()
 	_pool_limit.clear()
 	_pool_release.clear()
+	_hooks.clear()
 	for entry in ProjectSettings.get_global_class_list():
 		if String(entry.get("language", "")) != "GDScript":
 			continue
@@ -223,6 +225,7 @@ func discover() -> void:
 		_scan(_scripts[global_name])
 	_bind_scanned_properties()
 	_apply_deferred()
+	_resolve_hooks()
 	_open_existing_scenes()
 
 
@@ -779,6 +782,7 @@ func _remember(definition: ComponentDefinition, instance: Object) -> void:
 	else:
 		app_scope.store(definition, instance)
 		app_scope.attach(instance)
+	_hook_before_ready(instance)
 	_arm_lifecycle(instance, scene_id, report)
 	_arm_scene_hooks(instance, scene_id, report)
 
@@ -3107,19 +3111,131 @@ func _describe_qualifiers(qualifiers: Array) -> String:
 	return ", ".join(parts)
 
 
+func _resolve_hooks() -> void:
+	_hooks.clear()
+	var hook_script := _scripts.get("ContainerHook") as GDScript
+	if hook_script == null:
+		return
+	for definition in selector.select(definitions, hook_script, []):
+		var instance := _instance_of(definition)
+		if instance is ContainerHook:
+			_hooks.append(instance)
+
+
+func _hook_before_ready(instance: Object) -> void:
+	for hook in _hooks:
+		(hook as ContainerHook).before_ready(instance)
+
+
+func _install_properties(script: GDScript, chains: Dictionary) -> bool:
+	if script == null:
+		return true
+	for hook in _hooks:
+		var parts: Variant = (hook as ContainerHook).weave(script)
+		if not (parts is Dictionary) or (parts as Dictionary).is_empty():
+			continue
+		var source := String((parts as Dictionary).get("source", ""))
+		if source.is_empty():
+			return true
+		if not chains.is_empty():
+			source = _splice_advice(source, script, chains)
+			if source.is_empty():
+				return false
+		script.source_code = source
+		if script.reload() != OK:
+			push_error("MVC: %s properties failed to compile." % _script_name(script))
+			return false
+		return true
+	return true
+
+
+func _property_script(script: GDScript) -> bool:
+	return script != null and script.source_code.find("PropNotify.changed") >= 0
+
+
+func _splice_advice(source: String, origin: GDScript, chains: Dictionary) -> String:
+	var lines := source.split("\n")
+	var declared := _declared_methods(origin)
+	var output := PackedStringArray()
+	var header := true
+	var inserted := source.find("var __aop_chains") >= 0
+	var index := 0
+	while index < lines.size():
+		var line := lines[index]
+		if header:
+			output.append(line)
+			if line.begins_with("extends ") or line.begins_with("extends\t"):
+				header = false
+			index += 1
+			continue
+		if not inserted and not line.strip_edges().is_empty() and not line.strip_edges().begins_with("#"):
+			output.append("var __aop_chains: Dictionary = {}")
+			output.append("")
+			inserted = true
+		var method_name := _column_func(line)
+		if method_name.is_empty() or not _chain_has(chains, method_name):
+			output.append(line)
+			index += 1
+			continue
+		var block := PackedStringArray()
+		block.append(line)
+		index += 1
+		while index < lines.size() and _indented_or_blank(lines[index]):
+			block.append(lines[index])
+			index += 1
+		var record: Dictionary = declared.get(StringName(method_name), {})
+		var info: Dictionary = record.get("info", {})
+		var rendered := AopProxy.render_body(info, "\n".join(block))
+		if rendered.is_empty():
+			push_error("MVC: %s.%s could not be woven." % [_script_name(origin), method_name])
+			return ""
+		output.append(rendered)
+	if not inserted:
+		output.append("var __aop_chains: Dictionary = {}")
+	return "\n".join(output)
+
+
+func _column_func(line: String) -> String:
+	if not line.begins_with("func "):
+		return ""
+	var text := line.substr(5).strip_edges()
+	var end := 0
+	while end < text.length():
+		var code := text.unicode_at(end)
+		var ident := (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or (code >= 48 and code <= 57) or code == 95
+		if not ident:
+			break
+		end += 1
+	return text.substr(0, end)
+
+
+func _indented_or_blank(line: String) -> bool:
+	return line.strip_edges().is_empty() or line.begins_with("\t") or line.begins_with(" ")
+
+
+func _chain_has(chains: Dictionary, method_name: String) -> bool:
+	for key in chains:
+		if String(key) == method_name:
+			return true
+	return false
+
+
 func _construct_woven(definition: ComponentDefinition, args: Array, from_node: Node) -> Object:
-	var script := definition.owner_script
+	var origin := definition.owner_script
 	var chains: Dictionary = {}
-	if script != null and not AnnotationUtils.has_annotation(script, Aspect):
+	if origin != null and not AnnotationUtils.has_annotation(origin, Aspect):
 		var advice_from: Node = from_node if int(_definition_scene.get(definition, 0)) != 0 else null
-		var bound: Variant = _bind_advice(script, advice_from)
+		var bound: Variant = _bind_advice(origin, advice_from)
 		if bound == null:
 			return null
 		chains = bound
-		if not chains.is_empty():
-			script = _proxy_for(definition.owner_script, chains)
-			if script == null:
-				return null
+	if not _install_properties(origin, chains):
+		return null
+	var script := origin
+	if not _property_script(origin) and not chains.is_empty():
+		script = _proxy_for(origin, chains)
+		if script == null:
+			return null
 	var pushed := false
 	if not chains.is_empty():
 		AopDispatch.push(script, chains)
