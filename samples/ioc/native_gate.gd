@@ -1,0 +1,2 @@
+class_name NativeGate
+extends RefCounted

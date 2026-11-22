@@ -94,6 +94,10 @@ func _ready() -> void:
 	_check(lines, (box.configuration(TemplateFactory) != null) == OS.has_feature("template") and _has_label(box, "TemplateFactory.ghost") == OS.has_feature("template") and _has_label(box, "HiddenFeatureAudio") == OS.has_feature("template"), "a missing feature skips the configuration and the settings object")
 	if OS.has_feature("editor"):
 		_check(lines, box.resolve(EditorBanner) != null and box.resolve(EditorGate) != null, "the editor feature component resolves")
+	_check(lines, box.resolve(NativeClassBanner) != null and box.resolve(ScriptClassBanner) != null and box.resolve(BothClasses) != null and box.resolve(MissingAddonHook) != null, "a present class name registers, and a missing name registers the fallback")
+	_check(lines, not _has_label(box, "MissingAddonBanner") and not _has_label(box, "NativeMissingBanner") and not _has_label(box, "HalfClasses") and not _has_label(box, "ScriptMissingBanner"), "a missing class skips the component, and a present class skips the missing-class fallback")
+	_check(lines, box.resolve(NativeGate) != null and box.resolve(FallbackGate) != null and not _has_label(box, "ClassFactory.addon_gate"), "a class name gates the factory method")
+	_check(lines, box.configuration(AbsentNodeFactory) == null and not _has_label(box, "AbsentNodeFactory.ghost") and not _has_label(box, "HiddenClassAudio"), "a failed class condition skips the configuration and the settings object")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):

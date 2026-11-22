@@ -8,3 +8,12 @@ extends GDScriptAnnotation
 
 func matches(_environment: PropertyEnvironment) -> bool:
 	return false
+
+
+static func type_present(type_name: String) -> bool:
+	if ClassDB.class_exists(type_name):
+		return true
+	for entry in ProjectSettings.get_global_class_list():
+		if String(entry.get("class", "")) == type_name:
+			return true
+	return false
