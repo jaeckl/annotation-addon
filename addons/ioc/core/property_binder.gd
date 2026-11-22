@@ -41,7 +41,7 @@ func bind(instance: Object, prefix: String, environment: PropertyEnvironment) ->
 		if not converted["ok"]:
 			return false
 		instance.set(StringName(property_name), converted["value"])
-	return true
+	return _passes_validation(instance, script)
 
 
 func _convert(script: GDScript, property_name: String, type_code: int, value: Variant) -> Dictionary:
@@ -60,6 +60,34 @@ func _convert(script: GDScript, property_name: String, type_code: int, value: Va
 
 func _supported(type_code: int) -> bool:
 	return type_code == TYPE_INT or type_code == TYPE_FLOAT or type_code == TYPE_BOOL or type_code == TYPE_STRING
+
+
+func _passes_validation(instance: Object, script: GDScript) -> bool:
+	# The validation addon is optional. A missing Validator skips the check.
+	# This file does not name that class, so the binder still parses without it.
+	var validator := _validation_script()
+	if validator == null:
+		return true
+	var violations: Variant = validator.call(&"validate", instance)
+	if not (violations is Array) or violations.is_empty():
+		return true
+	var parts := PackedStringArray()
+	for item in violations:
+		if item == null:
+			continue
+		parts.append("%s %s" % [item.get("member"), item.get("message")])
+	push_error("IOC: %s failed validation. %s" % [_script_name(script), "; ".join(parts)])
+	return false
+
+
+func _validation_script() -> GDScript:
+	for entry in ProjectSettings.get_global_class_list():
+		if String(entry.get("class", "")) != "Validator":
+			continue
+		if String(entry.get("language", "")) != "GDScript":
+			return null
+		return load(String(entry.get("path", ""))) as GDScript
+	return null
 
 
 func _script_name(script: GDScript) -> String:
