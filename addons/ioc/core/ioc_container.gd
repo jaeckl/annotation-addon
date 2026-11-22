@@ -41,6 +41,8 @@ var _scene_physics: Dictionary = {}
 var _frame: FrameDriver
 var _app_input: Array = []
 var _scene_input: Dictionary = {}
+var _app_actions: Array = []
+var _scene_actions: Dictionary = {}
 var _input_driver: UnhandledInputDriver
 var _publishing: Array = []
 var _async_inflight: Dictionary = {}
@@ -283,6 +285,7 @@ func _on_node_removed(node: Node) -> void:
 	_scene_process.erase(scene_id)
 	_scene_physics.erase(scene_id)
 	_scene_input.erase(scene_id)
+	_scene_actions.erase(scene_id)
 	_open_scenes.erase(scene_id)
 	_cancel_scene_async(scene_id)
 
@@ -500,6 +503,7 @@ func _remember(definition: ComponentDefinition, instance: Object) -> void:
 	_store_listeners(instance, scene_id, report)
 	_store_ticks(instance, scene_id, report)
 	_store_input(instance, scene_id, report)
+	_store_actions(instance, scene_id, report)
 	if scene_id != 0:
 		var bucket: Dictionary = _scene_instances.get(scene_id, {})
 		bucket[definition] = instance
@@ -619,6 +623,8 @@ func _drop_frame() -> void:
 	_app_physics.clear()
 	_scene_process.clear()
 	_scene_physics.clear()
+	_app_actions.clear()
+	_scene_actions.clear()
 
 
 ## Calls every published @Process method. The frame node uses this from
@@ -986,6 +992,164 @@ func _reject_configuration_input_mark(annotation: Object, target: Object, bucket
 	push_error("IOC: @UnhandledInput on %s belongs on a method." % _script_name(script))
 
 
+## Polls every published @InputAction. The frame node calls this at the
+## start of _process, before the @Process methods. A direct call uses the
+## same lists. The value is the held state, including zero.
+func run_input_actions() -> void:
+	var calls: Array = _app_actions.duplicate()
+	for scene_id in _scene_actions.keys():
+		var bucket: Array = _scene_actions.get(scene_id, [])
+		calls.append_array(bucket.duplicate())
+	for record in calls:
+		_call_action(record)
+
+
+func _call_action(record: Dictionary) -> void:
+	var instance: Object = record.get("instance")
+	if instance == null or not is_instance_valid(instance):
+		return
+	var negative := StringName(String(record.get("negative", "")))
+	var positive := StringName(String(record.get("positive", "")))
+	var value: Variant
+	match String(record.get("kind", "")):
+		"axis":
+			value = Input.get_axis(negative, positive)
+		"strength":
+			value = Input.get_action_strength(negative)
+		_:
+			value = Input.is_action_pressed(negative)
+	var result: Variant = instance.call(record.get("method"), value)
+	if not _is_suspended(result):
+		return
+	var script := record.get("script") as GDScript
+	push_error("IOC: %s.%s cannot await." % [_script_name(script), record.get("method")])
+
+
+func _store_actions(instance: Object, scene_id: int, report: bool) -> void:
+	var script := instance.get_script() as GDScript
+	if script == null:
+		return
+	for action in _collect_actions(script, report):
+		_append_action(scene_id, {
+			"instance": instance,
+			"method": action.get("method"),
+			"script": action.get("script"),
+			"negative": action.get("negative", ""),
+			"positive": action.get("positive", ""),
+			"kind": action.get("kind", ""),
+		})
+
+
+func _append_action(scene_id: int, record: Dictionary) -> void:
+	if scene_id == 0:
+		_app_actions.append(record)
+		return
+	var bucket: Array = _scene_actions.get(scene_id, [])
+	bucket.append(record)
+	_scene_actions[scene_id] = bucket
+
+
+func _collect_actions(script: GDScript, report: bool) -> Array:
+	var found: Array = []
+	if script == null:
+		return found
+	if _is_node_script(script):
+		if report:
+			_reject_actions_on_node(script)
+		return found
+	var current := script
+	while current != null:
+		var bucket := {"script": current, "found": found, "report": report}
+		AnnotationUtils.for_each_annotation_initialized(InputAction, current, _take_action.bind(bucket))
+		current = current.get_base_script()
+	return found
+
+
+func _take_action(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	var report: bool = bucket["report"]
+	if not (target is FunctionInfo):
+		if report:
+			push_error("IOC: @InputAction on %s belongs on a method." % _script_name(script))
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		if report:
+			push_error("IOC: %s.%s is static and cannot poll an action." % [_script_name(script), info.name])
+		return
+	var parameter := _action_parameter(script, info.name)
+	if parameter == "":
+		if report:
+			push_error("IOC: %s.%s must take one float or bool." % [_script_name(script), info.name])
+		return
+	var negative := String(annotation.get("negative")).strip_edges()
+	var positive := String(annotation.get("positive")).strip_edges()
+	if negative.is_empty():
+		if report:
+			push_error("IOC: %s.%s needs an action." % [_script_name(script), info.name])
+		return
+	if not positive.is_empty() and parameter != "float":
+		if report:
+			push_error("IOC: %s.%s axis needs a float." % [_script_name(script), info.name])
+		return
+	if not InputMap.has_action(negative) or (not positive.is_empty() and not InputMap.has_action(positive)):
+		if report:
+			var missing := negative if not InputMap.has_action(negative) else positive
+			push_error("IOC: %s.%s action \"%s\" is not in the input map." % [_script_name(script), info.name, missing])
+		return
+	var kind := "axis" if not positive.is_empty() else ("strength" if parameter == "float" else "pressed")
+	bucket["found"].append({
+		"method": info.name,
+		"script": script,
+		"negative": negative,
+		"positive": positive,
+		"kind": kind,
+	})
+
+
+func _action_parameter(script: GDScript, method: StringName) -> String:
+	var args := _method_args(script, method)
+	if args.size() != 1:
+		return ""
+	var type_code := int(args[0].get("type", TYPE_NIL))
+	if type_code == TYPE_FLOAT:
+		return "float"
+	if type_code == TYPE_BOOL:
+		return "bool"
+	return ""
+
+
+func _reject_actions_on_node(script: GDScript) -> void:
+	var current := script
+	while current != null:
+		var bucket := {"script": current}
+		AnnotationUtils.for_each_annotation_initialized(InputAction, current, _reject_node_action.bind(bucket))
+		current = current.get_base_script()
+
+
+func _reject_node_action(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @InputAction on a Node." % [_script_name(script), info.name])
+		return
+	push_error("IOC: @InputAction on %s belongs on a method." % _script_name(script))
+
+
+func _reject_configuration_actions(script: GDScript) -> void:
+	var bucket := {"script": script}
+	AnnotationUtils.for_each_annotation_initialized(InputAction, script, _reject_configuration_action.bind(bucket))
+
+
+func _reject_configuration_action(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @InputAction on a configuration. Put it on a component." % [_script_name(script), info.name])
+		return
+	push_error("IOC: @InputAction on %s belongs on a method." % _script_name(script))
+
+
 func _reject_misplaced_async(script: GDScript) -> void:
 	AnnotationUtils.for_each_annotation_initialized(Async, script, _take_async.bind(script))
 
@@ -1042,6 +1206,7 @@ func _register_configuration(script: GDScript) -> void:
 	_reject_configuration_listeners(script)
 	_reject_configuration_ticks(script)
 	_reject_configuration_input(script)
+	_reject_configuration_actions(script)
 	_collect_property_roots(script)
 	var bucket := {"script": script, "factory": factory}
 	AnnotationUtils.for_each_annotation_initialized(Component, script, _take_configuration_component.bind(bucket))
@@ -1109,6 +1274,7 @@ func _register_property_product(script: GDScript) -> void:
 		return
 	_collect_ticks(script, true)
 	_collect_input(script, true)
+	_collect_actions(script, true)
 	_add_definition(script, [], _script_name(script), script, null, &"", [], [])
 	_remember(_newest_definition(), instance)
 
@@ -1166,6 +1332,7 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 	_collect_listeners(return_script, true)
 	_collect_ticks(return_script, true)
 	_collect_input(return_script, true)
+	_collect_actions(return_script, true)
 	_add_definition(return_script, _qualifiers(script, "func", method, &""), "%s.%s" % [_script_name(script), method], script, factory, method, parameters, fields)
 
 
@@ -1185,6 +1352,7 @@ func _register_class_product(script: GDScript) -> void:
 	_collect_listeners(script, true)
 	_collect_ticks(script, true)
 	_collect_input(script, true)
+	_collect_actions(script, true)
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
 	_record_advice(script)
 

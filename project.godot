@@ -22,3 +22,22 @@ enabled=PackedStringArray("res://addons/annotation_reflect/plugin.cfg", "res://a
 [audio]
 
 channels=6
+
+[input]
+
+aim={
+"deadzone": 0.5,
+"events": []
+}
+fire={
+"deadzone": 0.5,
+"events": []
+}
+move_left={
+"deadzone": 0.5,
+"events": []
+}
+move_right={
+"deadzone": 0.5,
+"events": []
+}
