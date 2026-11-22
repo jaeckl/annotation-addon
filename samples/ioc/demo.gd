@@ -1,8 +1,7 @@
 extends Control
 
-## Runs the first slice and prints one line per check.
-## @onready stays a scene path. This node is not a @Component, and the
-## container does not fill it.
+## Runs the app-scope slice and the scene enter-tree fill.
+## This node is not a @Component. @onready below is only the report label.
 @onready var report: Label = $Report
 
 
@@ -19,6 +18,9 @@ func _ready() -> void:
 	var party_again := box.resolve(Party) as Party
 	var music := box.resolve(MusicPlayer) as MusicPlayer
 	var hud := box.resolve(Hud) as Hud
+	var camp := box.resolve(Camp) as Camp
+	var spotter = $Spotter
+	var planted := $PlantedHud as Hud
 	await get_tree().process_frame
 	var goblin := box.resolve(Goblin) as Goblin
 	var enemy := box.resolve(Enemy)
@@ -42,10 +44,15 @@ func _ready() -> void:
 	_check(lines, goblin != null and goblin.label() == "goblin" and goblin != party.bruiser, "Goblin resolves as itself")
 	_check(lines, enemy == null, "Enemy with no qualifier is ambiguous")
 	_check(lines, cycle == null, "cycle is rejected")
-	_check(lines, factory != null and factory.made == 2, "one configuration instance builds sword and escort")
+	_check(lines, factory != null and factory.made == 3, "one configuration instance builds sword, escort, and camp")
 	_check(lines, bad != null and not _has_label(box, "BadFactory.missing_return_type"), "untyped factory method is not registered")
 	_check(lines, music != null and music.get_parent() == get_tree().root and music.track == "town", "Node product is parented to the tree root")
 	_check(lines, hud != null and hud.saw_clock and hud.get_parent() == get_tree().root, "Node _ready sees the injected clock")
+	_check(lines, spotter.get("clock") == party.clock and spotter.get("bruiser") == party.bruiser and spotter.get("boss") is Dragon and spotter.get("stalker") is Wolf, "scene node receives @Inject on enter")
+	_check(lines, spotter.get("clock_ready") and spotter.get("badge_text") == "scout", "@onready runs after @Inject and still reads $Badge")
+	_check(lines, planted.clock == null and not planted.saw_clock, "scene node that is also @Component is not filled")
+	var lookout = camp.get_node("Lookout") if camp != null else null
+	_check(lines, lookout != null and lookout.get("clock") == party.clock and lookout.get("clock_ready"), "factory scene child receives @Inject on enter")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):

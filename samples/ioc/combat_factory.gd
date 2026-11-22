@@ -3,7 +3,9 @@ class_name CombatFactory
 extends RefCounted
 
 ## Factory. The container keeps one instance and calls the @Component methods.
-## made shows that both methods share that instance.
+## made shows that the methods share that instance. camp() instances a
+## scene. The container does not construct the children. They receive @Inject
+## when they enter the tree.
 var made := 0
 
 
@@ -22,3 +24,9 @@ func escort(@Inject @Qualifier("brute") bruiser: Enemy) -> Escort:
 	var formed := Escort.new()
 	formed.bruiser = bruiser
 	return formed
+
+
+@Component
+func camp() -> Camp:
+	made += 1
+	return preload("res://samples/ioc/camp.tscn").instantiate()

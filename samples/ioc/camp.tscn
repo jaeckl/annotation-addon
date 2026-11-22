@@ -1,0 +1,10 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://samples/ioc/camp.gd" id="1_camp"]
+[ext_resource type="Script" path="res://samples/ioc/lookout.gd" id="2_lookout"]
+
+[node name="Camp" type="Node"]
+script = ExtResource("1_camp")
+
+[node name="Lookout" type="Node" parent="."]
+script = ExtResource("2_lookout")

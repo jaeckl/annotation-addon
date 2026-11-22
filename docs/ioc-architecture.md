@@ -348,7 +348,15 @@ The first running slice uses only the decisions above that it needs.
 
 It includes `IOCMainLoop` as a `SceneTree`, `@Configuration` separate from `@Component`, discovery of global classes, app scope, class products and factory methods, injection of factory parameters, `_init` parameters, and `@Inject` fields on objects the container itself creates, parent-type matching, and the default qualifier matcher including a user subclass of `@Qualifier`. `QualifierMatcher`, `CandidateSelector`, and `AppScope` exist as the objects the container calls. A factory method with no declared return type is a registration error. A missing or ambiguous candidate is `push_error` with the candidate scripts named, and `resolve` returns null. The sample is one app-scoped `Node`, one `RefCounted`, two subclasses of one parent, and one `@Qualifier` that selects between them.
 
-It does not include scene scope, conditions, profiles, a custom `ScopeHandler`, a replacement policy, or the enter-tree fill for nodes a scene already created. That fill is specified above. It is the slice after this one.
+It does not include scene scope, conditions, profiles, a custom `ScopeHandler`, or a replacement policy.
+
+## Second slice
+
+A node Godot already created is filled from `SceneTree.node_added`. That signal runs after `_enter_tree` and before `@onready` and `_ready`. The container does not call `new()` for that node. `@Inject` fields are resolved by type and qualifier. `@onready` is left to Godot.
+
+A scene node whose script is also a class `@Component` is refused. The container would create a second instance. The scene instance is not filled.
+
+A child inside a scene that a factory instantiated is not constructed by the container. It uses the same enter-tree fill once that scene enters the tree. `RefCounted` products never enter the tree, so they stay on the creation path. A `Node` the container spawned is still filled before `add_child`. When it later enters the tree, `node_added` sees the stored instance and does not fill it again.
 
 ## Out of this plan
 

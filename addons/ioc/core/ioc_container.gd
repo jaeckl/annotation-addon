@@ -1,9 +1,9 @@
 class_name IOCContainer
 extends RefCounted
 
-## App-scope container for the first slice. Discovers global classes, registers
-## @Component classes and @Configuration methods, and resolves them by type.
-## Scene scope and enter-tree injection of scene-placed nodes are not here.
+## App-scope container. Discovers global classes, resolves products, and fills
+## @Inject on nodes a scene already created when those nodes enter the tree.
+## Scene scope is not here.
 var definitions: Array = []
 var matcher: QualifierMatcher
 var selector: CandidateSelector
@@ -11,6 +11,7 @@ var app_scope: AppScope
 var _scripts: Dictionary = {}
 var _factories: Dictionary = {}
 var _creating: Array = []
+var _field_cache: Dictionary = {}
 var _tree: SceneTree
 
 
@@ -20,6 +21,8 @@ func setup(tree: SceneTree) -> void:
 	selector = CandidateSelector.new(matcher)
 	app_scope = AppScope.new()
 	app_scope.setup(tree)
+	if not tree.node_added.is_connected(_on_node_added):
+		tree.node_added.connect(_on_node_added)
 
 
 func discover() -> void:
@@ -63,6 +66,30 @@ func resolve(type: GDScript, qualifiers: Array = [], _from_node: Node = null) ->
 		app_scope.attach(instance)
 	_creating.erase(definition)
 	return instance
+
+
+func _on_node_added(node: Node) -> void:
+	var script := node.get_script() as GDScript
+	if script == null:
+		return
+	var product := _class_product(script)
+	if product != null:
+		if app_scope.fetch(product) == node:
+			return
+		push_error("IOC: %s is in a scene and is also @Component. The container would create a second instance." % _script_name(script))
+		return
+	var fields = _fields(script)
+	if fields == null or fields.is_empty():
+		return
+	_inject_field_list(node, fields, "%s scene" % node.name, node)
+
+
+func _class_product(script: GDScript) -> ComponentDefinition:
+	for definition in definitions:
+		var product := definition as ComponentDefinition
+		if product != null and product.factory == null and product.type == script:
+			return product
+	return null
 
 
 func _scan(script: GDScript) -> void:
@@ -170,14 +197,18 @@ func _parameters(script: GDScript, method: StringName) -> Variant:
 
 
 func _fields(script: GDScript) -> Variant:
+	if _field_cache.has(script):
+		return _field_cache[script]
 	var fields: Array = []
 	var current := script
 	while current != null:
 		var bucket := {"script": current, "fields": fields, "failed": false}
 		AnnotationUtils.for_each_annotation_initialized(Inject, current, _take_field.bind(bucket))
 		if bucket["failed"]:
+			_field_cache[script] = null
 			return null
 		current = current.get_base_script()
+	_field_cache[script] = fields
 	return fields
 
 
@@ -253,10 +284,14 @@ func _construct(definition: ComponentDefinition) -> Object:
 
 
 func _inject_fields(instance: Object, definition: ComponentDefinition) -> bool:
-	for field in definition.fields:
-		var value: Object = resolve(field["type"], field["qualifiers"])
+	return _inject_field_list(instance, definition.fields, definition.label, null)
+
+
+func _inject_field_list(instance: Object, fields: Array, label: String, from_node: Node) -> bool:
+	for field in fields:
+		var value: Object = resolve(field["type"], field["qualifiers"], from_node)
 		if value == null:
-			push_error("IOC: missing field %s on %s." % [field["name"], definition.label])
+			push_error("IOC: missing field %s on %s." % [field["name"], label])
 			return false
 		instance.set(StringName(field["name"]), value)
 	return true
