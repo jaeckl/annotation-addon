@@ -32,7 +32,7 @@ Conditions and profiles are their own annotations. The factory reads every annot
 Two scopes:
 
 - **App.** One instance for the process. A `Node` is parented to the scene-tree root. A `RefCounted` is held by the container.
-- **Scene.** One instance per instanced scene root, keyed by that root's instance id. Not one instance per `PackedScene` resource.
+- **Scene.** One instance per sub-scene root, keyed by that root's instance id. Not one instance per `PackedScene` resource. The root is the nearest node, including the caller itself, whose `scene_file_path` is not empty. That is the root of the instanced sub-scene. A node written directly in the running scene uses the running scene's root, which has a `scene_file_path` too. A node with no such ancestor has no scene scope, and a scene-scoped resolve from it fails.
 
 The scene tree owns one container. The tree owns node lifetime. The container is the lookup index. It holds `RefCounted` instances itself. It does not parent nodes, and it does not keep a second owning reference to a node.
 
@@ -288,7 +288,39 @@ sequenceDiagram
     end
 ```
 
-The caller passes the node it is running on. The selector runs before the scope cache. `SceneScope` walks parents to the instanced scene root. `AppScope` ignores that root. A scene-scoped `Node` is parented under the scene root. An app-scoped `Node` is parented under the tree root. A `RefCounted` is stored by the handler and is not parented. A user `ScopeHandler` decides its own key, parent, and release.
+The caller passes the node it is running on. The selector runs before the scope cache. `SceneScope` walks parents to the sub-scene root (`scene_file_path` not empty). `AppScope` ignores that root. A scene-scoped `Node` is parented under the sub-scene root. An app-scoped `Node` is parented under the tree root. A `RefCounted` is stored by the handler and is not parented. A user `ScopeHandler` decides its own key, parent, and release.
+
+## Creation and `@onready`
+
+`@Component` is not a base class. The script keeps extending `Node`, `RefCounted`, or a more specific type such as `CharacterBody2D`. The container does not invent a component superclass, because a scene node has to stay the node type the scene expects.
+
+Who creates the object decides when `@Inject` can run. `@onready` is a third path and stays what it is.
+
+| | Who creates it | When `@Inject` is filled | `@onready` |
+| --- | --- | --- | --- |
+| `RefCounted` `@Component` | Container `new()` | Before the instance is published. It never enters the tree. | Does not apply. There is no tree and no `$` path. |
+| `Node` `@Component` | Container `new()`, then the scope handler parents it | After `new()`, before `add_child`. `_ready` can use the fields. | Still runs for this node's own children after it enters the tree. |
+| Node already in a scene | Godot instances the `PackedScene` | When that node enters the tree, before `@onready` and `_ready`. The container does not call `new()` again. | Unchanged. `$HealthBar` is still an `@onready` path. |
+| Node that is both | Do not. The scene and the container would each make an instance. | — | — |
+
+`@onready` binds a node that is already in this scene, by path, at ready time. `@Inject` binds a container product, by type and qualifier. A scene script uses `@onready` for its children and `@Inject` for a service that is not a child. Neither annotation does the other job.
+
+A scene node with `@Inject` is a consumer, not a product. It does not need `@Component`. `@Component` on a `Node` means the container spawns that node under the scope root. The node painted in the editor is the scene's instance, and the container only fills its `@Inject` fields.
+
+```mermaid
+sequenceDiagram
+    participant Scene as PackedScene
+    participant Node as Scene node
+    participant Box as IOCContainer
+    participant Ready as at-ready
+
+    Scene->>Node: instantiate
+    Node->>Box: enters the tree
+    Box->>Box: fill @Inject fields by type
+    Node->>Ready: @onready paths, then _ready
+```
+
+A `RefCounted` product skips this sequence. Nothing enters the tree, so the container fills `@Inject` at `new()` and `@onready` never runs. A container-spawned `Node` is filled before `add_child`, so its `_enter_tree` and `_ready` already see the injected fields. Children inside a scene that a factory instantiated still use the enter-tree pass, because the factory did not construct those children through the container.
 
 ## Scope lifecycle
 
@@ -316,13 +348,7 @@ The first running slice uses only the decisions above that it needs.
 
 It includes `IOCMainLoop` as a `SceneTree`, `@Configuration` separate from `@Component`, discovery of global classes, app scope, class products and factory methods, injection of factory parameters, `_init` parameters, and `@Inject` fields on objects the container itself creates, parent-type matching, and the default qualifier matcher including a user subclass of `@Qualifier`. `QualifierMatcher`, `CandidateSelector`, and `AppScope` exist as the objects the container calls. A factory method with no declared return type is a registration error. A missing or ambiguous candidate is `push_error` with the candidate scripts named, and `resolve` returns null. The sample is one app-scoped `Node`, one `RefCounted`, two subclasses of one parent, and one `@Qualifier` that selects between them.
 
-It does not include scene scope, conditions, profiles, a custom `ScopeHandler`, or a replacement policy. It does not inject nodes the scene file already created. Those nodes exist before `resolve` runs, and this plan does not yet say when their `@Inject` fields would be filled.
-
-## Still open
-
-Which node is the scene-scope root: the nearest ancestor with a `scene_file_path`, or only `current_scene`. The first slice does not choose, because it has no scene scope.
-
-Whether a node placed in a scene receives `@Inject` when it enters the tree. The first slice does not do that.
+It does not include scene scope, conditions, profiles, a custom `ScopeHandler`, a replacement policy, or the enter-tree fill for nodes a scene already created. That fill is specified above. It is the slice after this one.
 
 ## Out of this plan
 
