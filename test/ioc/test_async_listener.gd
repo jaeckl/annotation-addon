@@ -21,6 +21,8 @@ func before_each() -> void:
 
 
 func after_each() -> void:
+	if box != null:
+		box.shutdown()
 	box = null
 	gate = null
 	events = null
