@@ -358,6 +358,35 @@ A scene node whose script is also a class `@Component` is refused. The container
 
 A child inside a scene that a factory instantiated is not constructed by the container. It uses the same enter-tree fill once that scene enters the tree. `RefCounted` products never enter the tree, so they stay on the creation path. A `Node` the container spawned is still filled before `add_child`. When it later enters the tree, `node_added` sees the stored instance and does not fill it again.
 
+## Collection injection
+
+A single `@Inject` dependency still needs exactly one match. A typed array asks for every match.
+
+```gdscript
+@Inject var boss: Enemy
+@Offline
+@Inject var pack: Array[Enemy]
+```
+
+`boss` fails when the count is not one. `pack` receives every `Enemy` that carries `@Offline`, including a subclass such as `Wolf`. No qualifier on the array means every `Enemy`. Several qualifier annotations on the array are all required, the same rule as a single dependency. An empty match is an empty array. That is a wave with no members, not a missing dependency.
+
+Godot has no set type. The array is the list. Each product definition appears once, so the array is already unique by product. Order is the registration order and is not a promise. A map keyed by qualifier is not this rule.
+
+`VariableInfo` stores the array type and not the element type. The element type is the `PROPERTY_HINT_ARRAY_TYPE` hint on `get_script_property_list()`. An untyped `Array` has no element type and is a registration error. The same declaration works on a field, an `_init` parameter, and a factory-method parameter.
+
+Resolving the array creates each matching product in the caller's scope. With only app scope, that is the one app instance of each match. When scene scope exists, a list resolved from a scene node includes the app instances and that scene's instances, and not another scene's instances. A member that is already being created fails the whole injection, the same cycle rule as one dependency.
+
+```mermaid
+flowchart TD
+    field["@Inject field"]
+    one{"declared type"}
+    single["exactly one match or fail"]
+    many["every match, or an empty array"]
+    field --> one
+    one -->|Enemy| single
+    one -->|Array of Enemy| many
+```
+
 ## Out of this plan
 
 Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. Concrete `@ConditionalOn*` checks are the next design pass. Each one is a subclass of `Condition`. Profile comparison is a later policy of that same shape. Neither becomes a branch inside the container.
