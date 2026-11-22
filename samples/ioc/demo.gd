@@ -88,6 +88,33 @@ func _ready() -> void:
 	_check(lines, banner_violations.size() == 2, "every constraint on a field runs")
 	var pace_violations: Array = Validator.validate(NamedPace.new(0), [0])
 	_check(lines, pace_violations.size() == 1 and String(pace_violations[0].member) == "_init/pace", "a constructor parameter constraint runs")
+	var stage := StageCard.new()
+	_check(lines, Validator.validate(stage).is_empty() and box.resolve(StageSettings) != null and not _has_label(box, "RejectedStage"), "range, path, layers, bus, action, and locale constraints publish a valid stage")
+	stage.volume = 1.5
+	_check(lines, not Validator.validate(stage).is_empty(), "range rejects a value past the maximum")
+	stage.volume = 0.55
+	_check(lines, not Validator.validate(stage).is_empty(), "range rejects a value off the step")
+	stage.volume = 0.5
+	stage.title = "silence"
+	_check(lines, not Validator.validate(stage).is_empty(), "one of rejects a value outside the list")
+	stage.title = "town"
+	stage.scene = "res://samples/ioc/missing.tscn"
+	_check(lines, not Validator.validate(stage).is_empty(), "file rejects a missing res:// path")
+	stage.scene = "res://samples/ioc/demo.tscn"
+	stage.folder = "res://samples/ioc/demo.tscn"
+	_check(lines, not Validator.validate(stage).is_empty(), "dir rejects a file path")
+	stage.folder = "res://samples/ioc"
+	stage.mask = 16
+	_check(lines, not Validator.validate(stage).is_empty(), "layers rejects a bit outside the mask")
+	stage.mask = 3
+	stage.bus = "NoSuchBus"
+	_check(lines, not Validator.validate(stage).is_empty(), "audio bus rejects an unknown bus")
+	stage.bus = "Master"
+	stage.action = "no_such_action"
+	_check(lines, not Validator.validate(stage).is_empty(), "input action rejects an unknown action")
+	stage.action = "ui_accept"
+	stage.locale = "zz"
+	_check(lines, not Validator.validate(stage).is_empty(), "locale rejects an unknown locale")
 	_check(lines, not _has_label(box, "IgnoredSettings"), "settings outside the scan root are not registered")
 	_check(lines, box.resolve(RaidBanner) != null and box.resolve(CombatFlag) != null and box.resolve(QuietMatch) != null and box.resolve(MissingOn) != null and box.resolve(OpenGate) != null and box.resolve(BothOpen) != null, "matching property conditions register")
 	_check(lines, not _has_label(box, "PeaceBanner") and not _has_label(box, "QuietFlag") and not _has_label(box, "MissingOff") and not _has_label(box, "PresentButWrong") and not _has_label(box, "BothGates"), "failed property conditions stay unregistered")
