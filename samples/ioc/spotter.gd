@@ -10,5 +10,6 @@ extends Node
 @Inject var boss: Enemy
 @Offline
 @Inject var stalker: Enemy
+@Inject var enemies: Array[Enemy]
 @onready var badge_text: String = $Badge.text
 @onready var clock_ready: bool = clock != null and clock.started

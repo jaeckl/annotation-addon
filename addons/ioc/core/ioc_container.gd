@@ -12,6 +12,7 @@ var _scripts: Dictionary = {}
 var _factories: Dictionary = {}
 var _creating: Array = []
 var _field_cache: Dictionary = {}
+var _collection_failed := false
 var _tree: SceneTree
 
 
@@ -42,7 +43,7 @@ func configuration(script: GDScript) -> Object:
 	return _factories.get(script, null)
 
 
-func resolve(type: GDScript, qualifiers: Array = [], _from_node: Node = null) -> Object:
+func resolve(type: GDScript, qualifiers: Array = [], from_node: Node = null) -> Object:
 	if type == null:
 		push_error("IOC: resolve needs a script.")
 		return null
@@ -50,7 +51,10 @@ func resolve(type: GDScript, qualifiers: Array = [], _from_node: Node = null) ->
 	if found.size() != 1:
 		_report_selection(type, qualifiers, found)
 		return null
-	var definition := found[0] as ComponentDefinition
+	return _instance_of(found[0], from_node)
+
+
+func _instance_of(definition: ComponentDefinition, from_node: Node = null) -> Object:
 	if definition in _creating:
 		push_error("IOC: cycle while creating %s." % definition.label)
 		return null
@@ -58,14 +62,38 @@ func resolve(type: GDScript, qualifiers: Array = [], _from_node: Node = null) ->
 	if existing != null:
 		return existing
 	_creating.append(definition)
-	var instance := _construct(definition)
-	if instance != null and not _inject_fields(instance, definition):
+	var instance := _construct(definition, from_node)
+	if instance != null and not _inject_fields(instance, definition, from_node):
 		instance = null
 	if instance != null:
 		app_scope.store(definition, instance)
 		app_scope.attach(instance)
 	_creating.erase(definition)
 	return instance
+
+
+func _resolve_dependency(dependency: Dictionary, from_node: Node) -> Variant:
+	if dependency.get("collection", false):
+		return _resolve_all(dependency["type"], dependency["qualifiers"], from_node)
+	return resolve(dependency["type"], dependency["qualifiers"], from_node)
+
+
+func _resolve_all(type: GDScript, qualifiers: Array, from_node: Node) -> Array:
+	var found: Array = selector.select(definitions, type, qualifiers)
+	var result: Array = []
+	for definition in found:
+		var instance := _instance_of(definition, from_node)
+		if instance == null:
+			_collection_failed = true
+			return []
+		result.append(instance)
+	return _typed_array(type, result)
+
+
+func _typed_array(element: GDScript, values: Array) -> Array:
+	# class_name must be the native base. The script carries Enemy, so a
+	# subclass such as Dragon is accepted.
+	return Array(values, TYPE_OBJECT, element.get_instance_base_type(), element)
 
 
 func _on_node_added(node: Node) -> void:
@@ -182,18 +210,21 @@ func _add_definition(type: GDScript, qualifiers: Array, label: String, owner_scr
 
 func _parameters(script: GDScript, method: StringName) -> Variant:
 	var parameters: Array = []
-	for info in ReflectionUtils.get_parameter_list(script, method):
-		var parameter := info as ParameterInfo
-		var parameter_script := _script_from_type(parameter.type, parameter.type_class)
-		if parameter_script == null:
-			push_error("IOC: %s.%s parameter %s needs a global GDScript type." % [_script_name(script), method, parameter.name])
+	for argument in _method_args(script, method):
+		var argument_name := String(argument.get("name", ""))
+		var dependency = _dependency_from_info("%s.%s" % [_script_name(script), method], argument_name, argument, _qualifiers(script, "param", method, StringName(argument_name)))
+		if dependency == null:
 			return null
-		parameters.append({
-			"name": String(parameter.name),
-			"type": parameter_script,
-			"qualifiers": _qualifiers(script, "param", method, parameter.name),
-		})
+		parameters.append(dependency)
 	return parameters
+
+
+func _method_args(script: GDScript, method: StringName) -> Array:
+	for info in script.get_script_method_list():
+		if StringName(info.get("name", "")) != method:
+			continue
+		return info.get("args", [])
+	return []
 
 
 func _fields(script: GDScript) -> Variant:
@@ -221,16 +252,54 @@ func _take_field(annotation: Object, target: Object, bucket: Dictionary) -> void
 		push_error("IOC: %s.%s is static and cannot be injected." % [_script_name(script), info.name])
 		bucket["failed"] = true
 		return
-	var field_script := _script_from_type(info.type, info.type_class)
-	if field_script == null:
-		push_error("IOC: %s.%s needs a global GDScript type." % [_script_name(script), info.name])
+	var property := _property_info(script, String(info.name))
+	var dependency = _dependency_from_info("%s.%s" % [_script_name(script), info.name], String(info.name), property, _qualifiers(script, "var", info.name, &""))
+	if dependency == null:
 		bucket["failed"] = true
 		return
-	bucket["fields"].append({
-		"name": String(info.name),
-		"type": field_script,
-		"qualifiers": _qualifiers(script, "var", info.name, &""),
-	})
+	bucket["fields"].append(dependency)
+
+
+func _property_info(script: GDScript, property_name: String) -> Dictionary:
+	var current := script
+	while current != null:
+		for property in current.get_script_property_list():
+			if String(property.get("name", "")) == property_name:
+				return property
+		current = current.get_base_script()
+	return {}
+
+
+func _dependency_from_info(label: String, dependency_name: String, info: Dictionary, qualifiers: Array) -> Variant:
+	if info.is_empty():
+		push_error("IOC: %s has no type." % label)
+		return null
+	var type_code := int(info.get("type", TYPE_NIL))
+	if type_code == TYPE_ARRAY:
+		if int(info.get("hint", 0)) != PROPERTY_HINT_ARRAY_TYPE:
+			push_error("IOC: %s needs Array[Type], not an untyped Array." % label)
+			return null
+		var element_name := String(info.get("hint_string", ""))
+		var element_script := _scripts.get(element_name) as GDScript
+		if element_script == null:
+			push_error("IOC: %s element \"%s\" needs a global GDScript type." % [label, element_name])
+			return null
+		return {
+			"name": dependency_name,
+			"type": element_script,
+			"collection": true,
+			"qualifiers": qualifiers,
+		}
+	var dependency_script := _script_from_type(type_code, StringName(String(info.get("class_name", ""))))
+	if dependency_script == null:
+		push_error("IOC: %s needs a global GDScript type." % label)
+		return null
+	return {
+		"name": dependency_name,
+		"type": dependency_script,
+		"collection": false,
+		"qualifiers": qualifiers,
+	}
 
 
 func _qualifiers(script: GDScript, kind: String, member: StringName, parameter: StringName) -> Array:
@@ -264,12 +333,11 @@ func _is_qualifier_target(target: Object, kind: String, member: StringName, para
 			return false
 
 
-func _construct(definition: ComponentDefinition) -> Object:
+func _construct(definition: ComponentDefinition, from_node: Node) -> Object:
 	var args: Array = []
 	for parameter in definition.parameters:
-		var value: Object = resolve(parameter["type"], parameter["qualifiers"])
-		if value == null:
-			push_error("IOC: missing argument %s for %s." % [parameter["name"], definition.label])
+		var value: Variant = _resolve_dependency(parameter, from_node)
+		if not _accept_dependency(parameter, value, "argument", definition.label):
 			return null
 		args.append(value)
 	var instance: Variant = null
@@ -283,17 +351,29 @@ func _construct(definition: ComponentDefinition) -> Object:
 	return instance
 
 
-func _inject_fields(instance: Object, definition: ComponentDefinition) -> bool:
-	return _inject_field_list(instance, definition.fields, definition.label, null)
+func _inject_fields(instance: Object, definition: ComponentDefinition, from_node: Node) -> bool:
+	return _inject_field_list(instance, definition.fields, definition.label, from_node)
 
 
 func _inject_field_list(instance: Object, fields: Array, label: String, from_node: Node) -> bool:
 	for field in fields:
-		var value: Object = resolve(field["type"], field["qualifiers"], from_node)
-		if value == null:
-			push_error("IOC: missing field %s on %s." % [field["name"], label])
+		var value: Variant = _resolve_dependency(field, from_node)
+		if not _accept_dependency(field, value, "field", label):
 			return false
 		instance.set(StringName(field["name"]), value)
+	return true
+
+
+func _accept_dependency(dependency: Dictionary, value: Variant, kind: String, label: String) -> bool:
+	if dependency.get("collection", false):
+		if _collection_failed:
+			_collection_failed = false
+			push_error("IOC: missing %s %s on %s." % [kind, dependency["name"], label])
+			return false
+		return true
+	if value == null:
+		push_error("IOC: missing %s %s on %s." % [kind, dependency["name"], label])
+		return false
 	return true
 
 

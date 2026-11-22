@@ -27,6 +27,14 @@ func escort(@Inject @Qualifier("brute") bruiser: Enemy) -> Escort:
 
 
 @Component
+func wave(@Offline @Inject pack: Array[Enemy]) -> Wave:
+	made += 1
+	var formed := Wave.new()
+	formed.enemies = pack
+	return formed
+
+
+@Component
 func camp() -> Camp:
 	made += 1
 	return preload("res://samples/ioc/camp.tscn").instantiate()

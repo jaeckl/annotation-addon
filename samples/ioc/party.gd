@@ -13,3 +13,10 @@ extends RefCounted
 @Inject var boss: Enemy
 @Offline
 @Inject var stalker: Enemy
+@Inject var enemies: Array[Enemy]
+@Offline
+@Inject var offline_pack: Array[Enemy]
+@Rank(kind = "boss")
+@Inject var bosses: Array[Enemy]
+@Qualifier("nobody")
+@Inject var nobody: Array[Enemy]

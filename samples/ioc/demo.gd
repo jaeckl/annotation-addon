@@ -27,6 +27,9 @@ func _ready() -> void:
 	var cycle := box.resolve(LoopLeft)
 	var factory := box.configuration(CombatFactory) as CombatFactory
 	var bad := box.configuration(BadFactory)
+	var bench := box.resolve(Bench) as Bench
+	var wave := box.resolve(Wave) as Wave
+	var bag := box.resolve(LoopBag)
 
 	_check(lines, party != null, "party resolved")
 	if party == null:
@@ -43,9 +46,18 @@ func _ready() -> void:
 	_check(lines, party.escort != null and party.escort.bruiser == party.bruiser, "factory parameter qualifier reuses Orc")
 	_check(lines, goblin != null and goblin.label() == "goblin" and goblin != party.bruiser, "Goblin resolves as itself")
 	_check(lines, enemy == null, "Enemy with no qualifier is ambiguous")
+	_check(lines, _same_members(party.enemies, [goblin, party.bruiser, party.boss, party.stalker]), "Array[Enemy] receives every enemy")
+	_check(lines, party.offline_pack.size() == 1 and party.offline_pack[0] == party.stalker, "@Offline array keeps only Wolf")
+	_check(lines, party.bosses.size() == 1 and party.bosses[0] == party.boss, "@Rank array keeps only Dragon")
+	_check(lines, party.nobody.is_empty(), "qualifier with no match is an empty array")
+	_check(lines, bench != null and _same_members(bench.enemies, party.enemies), "_init receives the enemy array")
+	_check(lines, wave != null and wave.enemies.size() == 1 and wave.enemies[0] == party.stalker, "factory parameter receives the offline array")
+	_check(lines, spotter.get("enemies") != null and _same_members(spotter.get("enemies"), party.enemies), "scene node receives the enemy array")
 	_check(lines, cycle == null, "cycle is rejected")
-	_check(lines, factory != null and factory.made == 3, "one configuration instance builds sword, escort, and camp")
+	_check(lines, bag == null, "array member cycle is rejected")
+	_check(lines, factory != null and factory.made == 4, "one configuration instance builds sword, escort, camp, and wave")
 	_check(lines, bad != null and not _has_label(box, "BadFactory.missing_return_type"), "untyped factory method is not registered")
+	_check(lines, not _has_label(box, "BadList"), "untyped Array is not registered")
 	_check(lines, music != null and music.get_parent() == get_tree().root and music.track == "town", "Node product is parented to the tree root")
 	_check(lines, hud != null and hud.saw_clock and hud.get_parent() == get_tree().root, "Node _ready sees the injected clock")
 	_check(lines, spotter.get("clock") == party.clock and spotter.get("bruiser") == party.bruiser and spotter.get("boss") is Dragon and spotter.get("stalker") is Wolf, "scene node receives @Inject on enter")
@@ -71,6 +83,15 @@ func _has_label(box: IOCContainer, label: String) -> bool:
 		if product != null and product.label == label:
 			return true
 	return false
+
+
+func _same_members(list: Variant, expected: Array) -> bool:
+	if list == null or not (list is Array) or list.size() != expected.size():
+		return false
+	for item in expected:
+		if not list.has(item):
+			return false
+	return true
 
 
 func _finish(lines: PackedStringArray, failed: bool) -> void:
