@@ -8,6 +8,8 @@ var definitions: Array = []
 var matcher: QualifierMatcher
 var selector: CandidateSelector
 var app_scope: AppScope
+var environment: PropertyEnvironment
+var parsers: Array = []
 var _scripts: Dictionary = {}
 var _factories: Dictionary = {}
 var _creating: Array = []
@@ -22,8 +24,46 @@ func setup(tree: SceneTree) -> void:
 	selector = CandidateSelector.new(matcher)
 	app_scope = AppScope.new()
 	app_scope.setup(tree)
+	environment = PropertyEnvironment.new()
+	parsers = [ConfigFilePropertySourceParser.new()]
+	_load_config_directory("res://config")
 	if not tree.node_added.is_connected(_on_node_added):
 		tree.node_added.connect(_on_node_added)
+
+
+func _load_config_directory(root: String) -> void:
+	var directory := DirAccess.open(root)
+	if directory == null:
+		return
+	var paths: PackedStringArray = PackedStringArray()
+	for file_name in directory.get_files():
+		var path := root.path_join(String(file_name))
+		if _parser_for(path) == null:
+			continue
+		paths.append(path)
+	paths.sort()
+	# Ascending names, each inserted at index 0. The last name wins.
+	for path in paths:
+		load_properties(path)
+
+
+func load_properties(path: String) -> void:
+	var parser := _parser_for(path)
+	if parser == null:
+		push_error("IOC: no property parser for %s." % path)
+		return
+	var source := parser.parse(path)
+	if source == null:
+		return
+	environment.add_first(source)
+
+
+func _parser_for(path: String) -> PropertySourceParser:
+	for parser in parsers:
+		var candidate := parser as PropertySourceParser
+		if candidate != null and candidate.handles(path):
+			return candidate
+	return null
 
 
 func discover() -> void:

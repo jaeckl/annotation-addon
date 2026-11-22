@@ -387,6 +387,16 @@ flowchart TD
     one -->|Array of Enemy| many
 ```
 
+## Property environment
+
+The container builds a `PropertyEnvironment` in `setup`, before discover. The name is not `Environment`, because that is Godot's rendering resource. Conditions will read it later. They do not resolve a bound settings object.
+
+A `PropertySource` is one named origin. `contains(key)` is how a missing key differs from a stored null. The source at index 0 wins. `add_first` inserts there. `PropertySourceParser` turns a path into a source. The first parser whose `handles` returns true reads the file. A custom format is another parser.
+
+This slice loads `res://config/*.cfg` through `ConfigFile`. Each entry is `section/key`. File names sort ascending, and each file is inserted at index 0, so the last name wins. A key only the earlier file has still comes from that file. A missing directory loads nothing. A file that fails to parse is skipped after `push_error`.
+
+`@ConfigurationProperties`, ProjectSettings, OS environment, command-line args, and `.tres` sources are the following slices. `@ConditionalOnProperty` comes after those and calls `environment.get_value` during registration.
+
 ## Out of this plan
 
-Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. Concrete `@ConditionalOn*` checks are the next design pass. Each one is a subclass of `Condition`. Profile comparison is a later policy of that same shape. Neither becomes a branch inside the container.
+Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. Concrete `@ConditionalOn*` checks wait until the property slices can feed them. Each one is a subclass of `Condition`. Profile comparison is a later policy of that same shape. Neither becomes a branch inside the container.

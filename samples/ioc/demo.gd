@@ -65,6 +65,12 @@ func _ready() -> void:
 	_check(lines, planted.clock == null and not planted.saw_clock, "scene node that is also @Component is not filled")
 	var lookout = camp.get_node("Lookout") if camp != null else null
 	_check(lines, lookout != null and lookout.get("clock") == party.clock and lookout.get("clock_ready"), "factory scene child receives @Inject on enter")
+	var settings := box.environment
+	_check(lines, settings != null and settings.sources.size() == 2, "two cfg files are loaded before the scene")
+	_check(lines, settings.contains("audio/master") and is_equal_approx(float(settings.get_value("audio/master")), 0.8), "later cfg file wins audio/master")
+	_check(lines, settings.get_value("audio/music") == "town", "earlier cfg file supplies audio/music")
+	_check(lines, settings.get_value("combat/enabled") == true and settings.get_value("combat/title") == "local", "later cfg file supplies its own keys")
+	_check(lines, not settings.contains("audio/missing"), "absent key is missing")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):
