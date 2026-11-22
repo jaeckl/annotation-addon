@@ -34,6 +34,11 @@ var _active_scene_root: Node
 var _scene_bucket: Array = []
 var _app_listeners: Array = []
 var _scene_listeners: Dictionary = {}
+var _app_process: Array = []
+var _app_physics: Array = []
+var _scene_process: Dictionary = {}
+var _scene_physics: Dictionary = {}
+var _frame: FrameDriver
 var _publishing: Array = []
 var _async_inflight: Dictionary = {}
 var _async_jobs: Array = []
@@ -66,6 +71,7 @@ func setup(tree: SceneTree) -> void:
 		tree.node_added.connect(_on_node_added)
 	if not tree.node_removed.is_connected(_on_node_removed):
 		tree.node_removed.connect(_on_node_removed)
+	_install_frame()
 
 
 ## Drops the scene-tree signals. A container left connected still injects
@@ -77,6 +83,7 @@ func shutdown() -> void:
 		_tree.node_added.disconnect(_on_node_added)
 	if _tree.node_removed.is_connected(_on_node_removed):
 		_tree.node_removed.disconnect(_on_node_removed)
+	_drop_frame()
 	_tree = null
 
 
@@ -268,6 +275,8 @@ func _on_node_removed(node: Node) -> void:
 	_scene_definitions.erase(scene_id)
 	_scene_instances.erase(scene_id)
 	_scene_listeners.erase(scene_id)
+	_scene_process.erase(scene_id)
+	_scene_physics.erase(scene_id)
 	_open_scenes.erase(scene_id)
 	_cancel_scene_async(scene_id)
 
@@ -481,7 +490,9 @@ func _register_event_publisher() -> void:
 func _remember(definition: ComponentDefinition, instance: Object) -> void:
 	var scene_id := int(_definition_scene.get(definition, 0))
 	var live := instance.get_script() as GDScript
-	_store_listeners(instance, scene_id, not _same_product_script(live, definition.type))
+	var report := not _same_product_script(live, definition.type)
+	_store_listeners(instance, scene_id, report)
+	_store_ticks(instance, scene_id, report)
 	if scene_id != 0:
 		var bucket: Dictionary = _scene_instances.get(scene_id, {})
 		bucket[definition] = instance
@@ -578,6 +589,182 @@ func _take_configuration_listener(annotation: Object, target: Object, bucket: Di
 	push_error("IOC: @EventListener on %s belongs on a method." % _script_name(script))
 
 
+func _install_frame() -> void:
+	if _tree == null or _tree.root == null or _frame != null:
+		return
+	_frame = FrameDriver.new()
+	_frame.container = self
+	_frame.name = "IocFrameDriver"
+	if _tree.root.is_inside_tree():
+		_tree.root.add_child(_frame)
+	else:
+		_tree.root.add_child.call_deferred(_frame)
+
+
+func _drop_frame() -> void:
+	if _frame != null and is_instance_valid(_frame):
+		_frame.container = null
+		if _frame.get_parent() != null:
+			_frame.get_parent().remove_child(_frame)
+		_frame.free()
+	_frame = null
+	_app_process.clear()
+	_app_physics.clear()
+	_scene_process.clear()
+	_scene_physics.clear()
+
+
+## Calls every published @Process method. The frame node uses this from
+## _process. A direct call uses the same lists.
+func run_process(delta: float) -> void:
+	_run_ticks(_app_process, _scene_process, delta)
+
+
+## Calls every published @PhysicsProcess method. The frame node uses this
+## from _physics_process.
+func run_physics_process(delta: float) -> void:
+	_run_ticks(_app_physics, _scene_physics, delta)
+
+
+func _run_ticks(app: Array, scenes: Dictionary, delta: float) -> void:
+	var calls: Array = app.duplicate()
+	for scene_id in scenes.keys():
+		var bucket: Array = scenes.get(scene_id, [])
+		calls.append_array(bucket.duplicate())
+	for record in calls:
+		_call_tick(record, delta)
+
+
+func _call_tick(record: Dictionary, delta: float) -> void:
+	var instance: Object = record.get("instance")
+	if instance == null or not is_instance_valid(instance):
+		return
+	var value: Variant = instance.call(record.get("method"), delta)
+	if not _is_suspended(value):
+		return
+	var script := record.get("script") as GDScript
+	push_error("IOC: %s.%s cannot await." % [_script_name(script), record.get("method")])
+
+
+func _store_ticks(instance: Object, scene_id: int, report: bool) -> void:
+	var script := instance.get_script() as GDScript
+	if script == null:
+		return
+	for tick in _collect_ticks(script, report):
+		_append_tick(scene_id, bool(tick.get("physics", false)), {
+			"instance": instance,
+			"method": tick.get("method"),
+			"script": tick.get("script"),
+		})
+
+
+func _append_tick(scene_id: int, physics: bool, record: Dictionary) -> void:
+	if scene_id == 0:
+		if physics:
+			_app_physics.append(record)
+		else:
+			_app_process.append(record)
+		return
+	var table: Dictionary = _scene_physics if physics else _scene_process
+	var bucket: Array = table.get(scene_id, [])
+	bucket.append(record)
+	table[scene_id] = bucket
+
+
+func _collect_ticks(script: GDScript, report: bool) -> Array:
+	var found: Array = []
+	if script == null:
+		return found
+	if _is_node_script(script):
+		if report:
+			_reject_ticks_on_node(script)
+		return found
+	var current := script
+	while current != null:
+		var bucket := {"script": current, "found": found, "report": report}
+		AnnotationUtils.for_each_annotation_initialized(Process, current, _take_process_tick.bind(bucket))
+		AnnotationUtils.for_each_annotation_initialized(PhysicsProcess, current, _take_physics_tick.bind(bucket))
+		current = current.get_base_script()
+	return found
+
+
+func _take_process_tick(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	_take_tick(target, bucket, false)
+
+
+func _take_physics_tick(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	_take_tick(target, bucket, true)
+
+
+func _take_tick(target: Object, bucket: Dictionary, physics: bool) -> void:
+	var script := bucket["script"] as GDScript
+	var label := "PhysicsProcess" if physics else "Process"
+	var report: bool = bucket["report"]
+	if not (target is FunctionInfo):
+		if report:
+			push_error("IOC: @%s on %s belongs on a method." % [label, _script_name(script)])
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		if report:
+			push_error("IOC: %s.%s is static and cannot tick." % [_script_name(script), info.name])
+		return
+	if not _takes_one_float(script, info.name):
+		if report:
+			push_error("IOC: %s.%s must take one float." % [_script_name(script), info.name])
+		return
+	bucket["found"].append({
+		"method": info.name,
+		"script": script,
+		"physics": physics,
+	})
+
+
+func _reject_ticks_on_node(script: GDScript) -> void:
+	var current := script
+	while current != null:
+		var bucket := {"script": current}
+		AnnotationUtils.for_each_annotation_initialized(Process, current, _reject_node_tick.bind(bucket, "Process"))
+		AnnotationUtils.for_each_annotation_initialized(PhysicsProcess, current, _reject_node_tick.bind(bucket, "PhysicsProcess"))
+		current = current.get_base_script()
+
+
+func _reject_node_tick(annotation: Object, target: Object, bucket: Dictionary, label: String) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @%s on a Node." % [_script_name(script), info.name, label])
+		return
+	push_error("IOC: @%s on %s belongs on a method." % [label, _script_name(script)])
+
+
+func _reject_configuration_ticks(script: GDScript) -> void:
+	var bucket := {"script": script}
+	AnnotationUtils.for_each_annotation_initialized(Process, script, _reject_configuration_tick.bind(bucket, "Process"))
+	AnnotationUtils.for_each_annotation_initialized(PhysicsProcess, script, _reject_configuration_tick.bind(bucket, "PhysicsProcess"))
+
+
+func _reject_configuration_tick(annotation: Object, target: Object, bucket: Dictionary, label: String) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @%s on a configuration. Put it on a component." % [_script_name(script), info.name, label])
+		return
+	push_error("IOC: @%s on %s belongs on a method." % [label, _script_name(script)])
+
+
+func _takes_one_float(script: GDScript, method: StringName) -> bool:
+	var args := _method_args(script, method)
+	if args.size() != 1:
+		return false
+	return int(args[0].get("type", TYPE_NIL)) == TYPE_FLOAT
+
+
+func _is_node_script(script: GDScript) -> bool:
+	var base := script.get_instance_base_type()
+	return base == &"Node" or ClassDB.is_parent_class(base, &"Node")
+
+
 func _reject_misplaced_async(script: GDScript) -> void:
 	AnnotationUtils.for_each_annotation_initialized(Async, script, _take_async.bind(script))
 
@@ -632,6 +819,7 @@ func _register_configuration(script: GDScript) -> void:
 		return
 	_factories[script] = factory
 	_reject_configuration_listeners(script)
+	_reject_configuration_ticks(script)
 	_collect_property_roots(script)
 	var bucket := {"script": script, "factory": factory}
 	AnnotationUtils.for_each_annotation_initialized(Component, script, _take_configuration_component.bind(bucket))
@@ -697,6 +885,7 @@ func _register_property_product(script: GDScript) -> void:
 		return
 	if not binder.bind(instance, prefix, environment):
 		return
+	_collect_ticks(script, true)
 	_add_definition(script, [], _script_name(script), script, null, &"", [], [])
 	_remember(_newest_definition(), instance)
 
@@ -752,6 +941,7 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 	if fields == null:
 		return
 	_collect_listeners(return_script, true)
+	_collect_ticks(return_script, true)
 	_add_definition(return_script, _qualifiers(script, "func", method, &""), "%s.%s" % [_script_name(script), method], script, factory, method, parameters, fields)
 
 
@@ -769,6 +959,7 @@ func _register_class_product(script: GDScript) -> void:
 	if fields == null:
 		return
 	_collect_listeners(script, true)
+	_collect_ticks(script, true)
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
 	_record_advice(script)
 
