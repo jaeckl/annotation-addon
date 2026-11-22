@@ -38,6 +38,10 @@ var _app_process: Array = []
 var _app_physics: Array = []
 var _scene_process: Dictionary = {}
 var _scene_physics: Dictionary = {}
+var _app_schedules: Array = []
+var _app_physics_schedules: Array = []
+var _scene_schedules: Dictionary = {}
+var _scene_physics_schedules: Dictionary = {}
 var _frame: FrameDriver
 var _app_input: Array = []
 var _scene_input: Dictionary = {}
@@ -318,6 +322,8 @@ func _on_node_removed(node: Node) -> void:
 	_scene_listeners.erase(scene_id)
 	_scene_process.erase(scene_id)
 	_scene_physics.erase(scene_id)
+	_scene_schedules.erase(scene_id)
+	_scene_physics_schedules.erase(scene_id)
 	_scene_input.erase(scene_id)
 	_scene_actions.erase(scene_id)
 	_drop_signal_links(scene_id)
@@ -745,6 +751,7 @@ func _remember(definition: ComponentDefinition, instance: Object) -> void:
 	var report := not _same_product_script(live, definition.type)
 	_store_listeners(instance, scene_id, report)
 	_store_ticks(instance, scene_id, report)
+	_store_schedules(instance, scene_id, report)
 	_store_input(instance, scene_id, report)
 	_store_actions(instance, scene_id, report)
 	_arm_signals(instance, scene_id, report)
@@ -867,6 +874,10 @@ func _drop_frame() -> void:
 	_app_physics.clear()
 	_scene_process.clear()
 	_scene_physics.clear()
+	_app_schedules.clear()
+	_app_physics_schedules.clear()
+	_scene_schedules.clear()
+	_scene_physics_schedules.clear()
 	_app_actions.clear()
 	_scene_actions.clear()
 
@@ -881,6 +892,16 @@ func run_process(delta: float) -> void:
 ## from _physics_process.
 func run_physics_process(delta: float) -> void:
 	_run_ticks(_app_physics, _scene_physics, delta)
+
+
+## Calls due @Scheduled methods that use idle time, idle frames, or cron.
+func run_scheduled(delta: float) -> void:
+	_run_schedules(_app_schedules, _scene_schedules, delta)
+
+
+## Calls due @Scheduled methods that count physics frames.
+func run_scheduled_physics() -> void:
+	_run_schedules(_app_physics_schedules, _scene_physics_schedules, 0.0)
 
 
 func _run_ticks(app: Array, scenes: Dictionary, delta: float) -> void:
@@ -901,6 +922,181 @@ func _call_tick(record: Dictionary, delta: float) -> void:
 		return
 	var script := record.get("script") as GDScript
 	push_error("IOC: %s.%s cannot await." % [_script_name(script), record.get("method")])
+
+
+func _run_schedules(app: Array, scenes: Dictionary, delta: float) -> void:
+	var calls: Array = app.duplicate()
+	for scene_id in scenes.keys():
+		var bucket: Array = scenes.get(scene_id, [])
+		calls.append_array(bucket.duplicate())
+	var now := Time.get_datetime_dict_from_system()
+	var stamp := _schedule_stamp(now)
+	for record in calls:
+		if _schedule_due(record, delta, now, stamp):
+			_call_schedule(record)
+
+
+func _schedule_due(record: Dictionary, delta: float, now: Dictionary, stamp: int) -> bool:
+	var spec := record.get("spec") as ScheduleSpec
+	if spec == null:
+		return false
+	if spec.kind == ScheduleSpec.TIME:
+		var elapsed := float(record.get("elapsed", 0.0)) + delta
+		if elapsed < spec.period and not is_equal_approx(elapsed, spec.period):
+			record["elapsed"] = elapsed
+			return false
+		record["elapsed"] = fmod(elapsed, spec.period)
+		return true
+	if spec.kind == ScheduleSpec.CRON:
+		if not spec.matches(now):
+			return false
+		if int(record.get("stamp", -1)) == stamp:
+			return false
+		record["stamp"] = stamp
+		return true
+	var count := int(record.get("count", 0)) + 1
+	if count < spec.frames:
+		record["count"] = count
+		return false
+	record["count"] = 0
+	return true
+
+
+func _call_schedule(record: Dictionary) -> void:
+	var instance: Object = record.get("instance")
+	if instance == null or not is_instance_valid(instance):
+		return
+	var value: Variant = instance.call(record.get("method"))
+	if not _is_suspended(value):
+		return
+	var script := record.get("script") as GDScript
+	push_error("IOC: %s.%s cannot await." % [_script_name(script), record.get("method")])
+
+
+func _schedule_stamp(now: Dictionary) -> int:
+	return int(now.get("year", 0)) * 10000000000 + int(now.get("month", 0)) * 100000000 + int(now.get("day", 0)) * 1000000 + int(now.get("hour", 0)) * 10000 + int(now.get("minute", 0)) * 100 + int(now.get("second", 0))
+
+
+func _store_schedules(instance: Object, scene_id: int, report: bool) -> void:
+	var script := instance.get_script() as GDScript
+	if script == null:
+		return
+	for item in _collect_schedules(script, report):
+		var spec := item.get("spec") as ScheduleSpec
+		var record := {
+			"instance": instance,
+			"method": item.get("method"),
+			"script": item.get("script"),
+			"spec": spec,
+			"elapsed": 0.0,
+			"count": 0,
+			"stamp": -1,
+		}
+		_append_schedule(scene_id, spec != null and spec.kind == ScheduleSpec.PHYSICS_FRAME, record)
+
+
+func _append_schedule(scene_id: int, physics: bool, record: Dictionary) -> void:
+	if scene_id == 0:
+		if physics:
+			_app_physics_schedules.append(record)
+		else:
+			_app_schedules.append(record)
+		return
+	var table: Dictionary = _scene_physics_schedules if physics else _scene_schedules
+	var bucket: Array = table.get(scene_id, [])
+	bucket.append(record)
+	table[scene_id] = bucket
+
+
+func _collect_schedules(script: GDScript, report: bool) -> Array:
+	var found: Array = []
+	if script == null:
+		return found
+	if _is_node_script(script):
+		if report:
+			_reject_schedules_on_node(script)
+		return found
+	var current := script
+	while current != null:
+		var bucket := {"script": current, "found": found, "report": report}
+		AnnotationUtils.for_each_annotation_initialized(Scheduled, current, _take_schedule.bind(bucket))
+		current = current.get_base_script()
+	return found
+
+
+func _take_schedule(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	var report: bool = bucket["report"]
+	if not (target is FunctionInfo):
+		if report:
+			push_error("IOC: @Scheduled on %s belongs on a method." % _script_name(script))
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		if report:
+			push_error("IOC: %s.%s is static and cannot be scheduled." % [_script_name(script), info.name])
+		return
+	if _method_args(script, info.name).size() != 0:
+		if report:
+			push_error("IOC: %s.%s must take nothing." % [_script_name(script), info.name])
+		return
+	var text := ""
+	if annotation != null:
+		text = String(annotation.get("value"))
+	var spec := ScheduleSpec.parse(text)
+	if spec.error != "":
+		if report:
+			_report_schedule(script, info.name, spec.error)
+		return
+	bucket["found"].append({
+		"method": info.name,
+		"script": script,
+		"spec": spec,
+	})
+
+
+func _report_schedule(script: GDScript, method: StringName, reason: String) -> void:
+	var who := "%s.%s" % [_script_name(script), method]
+	match reason:
+		"empty":
+			push_error("IOC: %s schedule is empty." % who)
+		"zero":
+			push_error("IOC: %s schedule must be greater than 0." % who)
+		"fraction":
+			push_error("IOC: %s must be a whole number of frames." % who)
+		_:
+			push_error("IOC: %s is not a schedule." % who)
+
+
+func _reject_schedules_on_node(script: GDScript) -> void:
+	var current := script
+	while current != null:
+		var bucket := {"script": current}
+		AnnotationUtils.for_each_annotation_initialized(Scheduled, current, _reject_node_schedule.bind(bucket))
+		current = current.get_base_script()
+
+
+func _reject_node_schedule(_annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @Scheduled on a Node." % [_script_name(script), info.name])
+		return
+	push_error("IOC: @Scheduled on %s belongs on a method." % _script_name(script))
+
+
+func _reject_configuration_schedules(script: GDScript) -> void:
+	var bucket := {"script": script}
+	AnnotationUtils.for_each_annotation_initialized(Scheduled, script, _reject_configuration_schedule.bind(bucket))
+
+
+func _reject_configuration_schedule(_annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @Scheduled on a configuration. Put it on a component." % [_script_name(script), info.name])
+		return
+	push_error("IOC: @Scheduled on %s belongs on a method." % _script_name(script))
 
 
 func _store_ticks(instance: Object, scene_id: int, report: bool) -> void:
@@ -1937,6 +2133,7 @@ func _register_pooled(script: GDScript) -> void:
 		return
 	_collect_listeners(script, true)
 	_collect_ticks(script, true)
+	_collect_schedules(script, true)
 	_collect_input(script, true)
 	_collect_actions(script, true)
 	_collect_signals(script, true)
@@ -1971,6 +2168,7 @@ func _register_configuration(script: GDScript) -> void:
 	_factories[script] = factory
 	_reject_configuration_listeners(script)
 	_reject_configuration_ticks(script)
+	_reject_configuration_schedules(script)
 	_reject_configuration_input(script)
 	_reject_configuration_actions(script)
 	_reject_configuration_signals(script)
@@ -2040,6 +2238,7 @@ func _register_property_product(script: GDScript) -> void:
 	if not binder.bind(instance, prefix, environment):
 		return
 	_collect_ticks(script, true)
+	_collect_schedules(script, true)
 	_collect_input(script, true)
 	_collect_actions(script, true)
 	_collect_signals(script, true)
@@ -2099,6 +2298,7 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 		return
 	_collect_listeners(return_script, true)
 	_collect_ticks(return_script, true)
+	_collect_schedules(return_script, true)
 	_collect_input(return_script, true)
 	_collect_actions(return_script, true)
 	_collect_signals(return_script, true)
@@ -2125,6 +2325,7 @@ func _register_class_product(script: GDScript) -> void:
 		return
 	_collect_listeners(script, true)
 	_collect_ticks(script, true)
+	_collect_schedules(script, true)
 	_collect_input(script, true)
 	_collect_actions(script, true)
 	_collect_signals(script, true)
