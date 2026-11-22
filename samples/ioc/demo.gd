@@ -162,6 +162,20 @@ func _ready() -> void:
 	_check(lines, box.resolve(NodeGate, [], self) != null and box.resolve(MissingNodeGate, [], self) == null and box.resolve(NodeGate, [], camp) == null and box.resolve(MissingNodeGate, [], camp) != null, "a node condition gates the factory method")
 	_check(lines, box.configuration(HudSceneFactory) != null and box.resolve(NodeFactoryMark, [], self) != null and box.resolve(NodeFactoryMark, [], camp) == null, "a configuration node condition runs only for the matching scene")
 	_check(lines, box.configuration(ClosedNodeFactory) == null and box.resolve(NodeGhost, [], self) == null and box.resolve(NodeGhost, [], camp) == null and box.resolve(PresentNodeAudio, [], self) != null and box.resolve(PresentNodeAudio, [], camp) == null and box.resolve(HiddenNodeAudio, [], self) == null, "a failed node condition skips the configuration and the settings object")
+	var health_desk := box.resolve(HealthDesk) as HealthDesk
+	var health_source := box.resolve(HealthSource) as HealthSource
+	if health_source != null:
+		health_source.raise(4)
+		health_source.raise_critical(1)
+		health_source.raise_mana(2)
+	_check(lines, health_desk != null and health_source != null and health_source.events != null and health_desk.health.size() == 2 and health_desk.health[0].current == 4 and health_desk.health[1] is CriticalHealth and health_desk.mana.size() == 1 and health_desk.broad.size() == 3, "a listener receives an event and its subclass, and skips a different type")
+	var demo_health := box.resolve(SceneHealthListener, [], self) as SceneHealthListener
+	var camp_health := box.resolve(SceneHealthListener, [], camp) as SceneHealthListener
+	if health_source != null:
+		health_source.events.publish(HealthChanged.new(9), self)
+		health_source.events.publish(HealthChanged.new(8), camp)
+		health_source.events.publish(HealthChanged.new(7))
+	_check(lines, demo_health != null and camp_health != null and demo_health != camp_health and demo_health.heard == 1 and camp_health.heard == 1, "a scene listener hears its own scene and skips an app publish")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):

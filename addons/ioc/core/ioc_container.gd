@@ -32,6 +32,8 @@ var _applying_scene := false
 var _active_scene_id := 0
 var _active_scene_root: Node
 var _scene_bucket: Array = []
+var _app_listeners: Array = []
+var _scene_listeners: Dictionary = {}
 
 
 func setup(tree: SceneTree) -> void:
@@ -141,6 +143,7 @@ func discover() -> void:
 		if script == null:
 			continue
 		_scripts[String(entry.get("class", ""))] = script
+	_register_event_publisher()
 	for global_name in _scripts:
 		_scan(_scripts[global_name])
 	_bind_scanned_properties()
@@ -239,6 +242,7 @@ func _on_node_removed(node: Node) -> void:
 		_definition_scene.erase(definition)
 	_scene_definitions.erase(scene_id)
 	_scene_instances.erase(scene_id)
+	_scene_listeners.erase(scene_id)
 	_open_scenes.erase(scene_id)
 
 
@@ -318,8 +322,50 @@ func _newest_definition() -> ComponentDefinition:
 	return definitions[definitions.size() - 1]
 
 
+func publish_event(event: Event, from_node: Node = null) -> void:
+	if event == null:
+		push_error("IOC: publish needs an Event.")
+		return
+	var event_script := event.get_script() as GDScript
+	if event_script == null or not _is_event(event_script):
+		push_error("IOC: publish needs an Event.")
+		return
+	_deliver(_app_listeners, event, event_script)
+	if from_node == null:
+		return
+	var root := _scene_root_of(from_node)
+	if root == null:
+		return
+	_deliver(_scene_listeners.get(root.get_instance_id(), []), event, event_script)
+
+
+func _deliver(listeners: Array, event: Event, event_script: GDScript) -> void:
+	for record in listeners:
+		var wanted := record.get("type") as GDScript
+		if wanted == null:
+			continue
+		if event_script != wanted and not _extends_script(event_script, wanted):
+			continue
+		var instance: Object = record.get("instance")
+		if instance == null or not is_instance_valid(instance):
+			continue
+		instance.call(record.get("method"), event)
+
+
+func _register_event_publisher() -> void:
+	var script := _scripts.get("EventPublisher") as GDScript
+	if script == null:
+		push_error("IOC: EventPublisher is missing.")
+		return
+	var publisher := EventPublisher.new()
+	publisher.container = self
+	_add_definition(script, [], "EventPublisher", script, null, &"", [], [])
+	_remember(_newest_definition(), publisher)
+
+
 func _remember(definition: ComponentDefinition, instance: Object) -> void:
 	var scene_id := int(_definition_scene.get(definition, 0))
+	_store_listeners(instance, scene_id, instance.get_script() != definition.type)
 	if scene_id != 0:
 		var bucket: Dictionary = _scene_instances.get(scene_id, {})
 		bucket[definition] = instance
@@ -340,6 +386,81 @@ func _attach_scene(scene_id: int, instance: Object) -> void:
 	if node.get_parent() != null:
 		return
 	root.add_child.call_deferred(node)
+
+
+func _store_listeners(instance: Object, scene_id: int, report: bool) -> void:
+	var script := instance.get_script() as GDScript
+	if script == null:
+		return
+	for listener in _collect_listeners(script, report):
+		var record := {
+			"instance": instance,
+			"method": listener["method"],
+			"type": listener["type"],
+		}
+		if scene_id != 0:
+			var bucket: Array = _scene_listeners.get(scene_id, [])
+			bucket.append(record)
+			_scene_listeners[scene_id] = bucket
+		else:
+			_app_listeners.append(record)
+
+
+func _collect_listeners(script: GDScript, report: bool) -> Array:
+	var found: Array = []
+	var current := script
+	while current != null:
+		var bucket := {"script": current, "found": found, "report": report}
+		AnnotationUtils.for_each_annotation_initialized(EventListener, current, _take_listener.bind(bucket))
+		current = current.get_base_script()
+	return found
+
+
+func _take_listener(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	var report: bool = bucket["report"]
+	if not (target is FunctionInfo):
+		if report:
+			push_error("IOC: @EventListener on %s belongs on a method." % _script_name(script))
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		if report:
+			push_error("IOC: %s.%s is static and cannot listen." % [_script_name(script), info.name])
+		return
+	var args := _method_args(script, info.name)
+	if args.size() != 1:
+		if report:
+			push_error("IOC: %s.%s must take one Event." % [_script_name(script), info.name])
+		return
+	var argument: Dictionary = args[0]
+	var event_script := _script_from_type(int(argument.get("type", TYPE_NIL)), StringName(String(argument.get("class_name", ""))))
+	if not _is_event(event_script):
+		if report:
+			push_error("IOC: %s.%s must take an Event." % [_script_name(script), info.name])
+		return
+	bucket["found"].append({"method": info.name, "type": event_script})
+
+
+func _reject_configuration_listeners(script: GDScript) -> void:
+	var bucket := {"script": script}
+	AnnotationUtils.for_each_annotation_initialized(EventListener, script, _take_configuration_listener.bind(bucket))
+
+
+func _take_configuration_listener(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		push_error("IOC: %s.%s is @EventListener on a configuration. Put it on a component." % [_script_name(script), info.name])
+		return
+	push_error("IOC: @EventListener on %s belongs on a method." % _script_name(script))
+
+
+func _is_event(script: GDScript) -> bool:
+	var event_script := _scripts.get("Event") as GDScript
+	if script == null or event_script == null:
+		return false
+	return script == event_script or _extends_script(script, event_script)
 
 
 func _class_product(script: GDScript) -> ComponentDefinition:
@@ -372,6 +493,7 @@ func _register_configuration(script: GDScript) -> void:
 		push_error("IOC: configuration %s produced null." % _script_name(script))
 		return
 	_factories[script] = factory
+	_reject_configuration_listeners(script)
 	_collect_property_roots(script)
 	var bucket := {"script": script, "factory": factory}
 	AnnotationUtils.for_each_annotation_initialized(Component, script, _take_configuration_component.bind(bucket))
@@ -491,6 +613,7 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 	var fields := _fields(return_script)
 	if fields == null:
 		return
+	_collect_listeners(return_script, true)
 	_add_definition(return_script, _qualifiers(script, "func", method, &""), "%s.%s" % [_script_name(script), method], script, factory, method, parameters, fields)
 
 
@@ -507,6 +630,7 @@ func _register_class_product(script: GDScript) -> void:
 	var fields := _fields(script)
 	if fields == null:
 		return
+	_collect_listeners(script, true)
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
 
 
