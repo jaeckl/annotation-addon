@@ -106,6 +106,8 @@ func _ready() -> void:
 	_check(lines, not _has_label(box, "MissingResourceBanner") and not _has_label(box, "MissingDirBanner") and not _has_label(box, "HalfResources") and not _has_label(box, "OutsideResourceBanner"), "a missing path skips the component, and a path outside res:// does not match")
 	_check(lines, box.resolve(ResourceGate) != null and not _has_label(box, "ResourceFactory.missing_gate"), "a resource path gates the factory method")
 	_check(lines, box.configuration(ClosedResourceFactory) == null and not _has_label(box, "ClosedResourceFactory.ghost") and not _has_label(box, "HiddenResourceAudio"), "a failed resource condition skips the configuration and the settings object")
+	_check(lines, box.resolve(ContextBanner) != null, "a custom condition reads the environment and the product list")
+	_check(lines, not _has_label(box, "SilentBanner") and not _has_label(box, "DeferredSpareBanner"), "a custom condition skips when the environment or the product list does not match")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):

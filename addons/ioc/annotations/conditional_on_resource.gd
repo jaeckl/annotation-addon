@@ -8,7 +8,7 @@ var path: String = ""
 const repeatable := true
 
 
-func matches(_environment: PropertyEnvironment) -> bool:
+func matches(_context: ConditionContext) -> bool:
 	var resource_path := path.strip_edges()
 	if resource_path.is_empty():
 		push_error("IOC: @ConditionalOnResource needs a path.")

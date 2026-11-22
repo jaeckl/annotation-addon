@@ -11,14 +11,15 @@ var match_if_missing: bool = false
 const repeatable := true
 
 
-func matches(environment: PropertyEnvironment) -> bool:
+func matches(context: ConditionContext) -> bool:
+	var property_environment := context.environment if context != null else null
 	var property_key := key.strip_edges()
 	if property_key.is_empty():
 		push_error("IOC: @ConditionalOnProperty needs a key.")
 		return false
-	if environment == null or not environment.contains(property_key):
+	if property_environment == null or not property_environment.contains(property_key):
 		return match_if_missing
-	var value: Variant = environment.get_value(property_key)
+	var value: Variant = property_environment.get_value(property_key)
 	if having_value.is_empty():
 		return not _is_false(value)
 	return _same(value, having_value)

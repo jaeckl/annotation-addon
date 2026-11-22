@@ -8,7 +8,7 @@ var type_name: String = ""
 const repeatable := true
 
 
-func matches(_environment: PropertyEnvironment) -> bool:
+func matches(_context: ConditionContext) -> bool:
 	var named := type_name.strip_edges()
 	if named.is_empty():
 		push_error("IOC: @ConditionalOnClass needs a type_name.")

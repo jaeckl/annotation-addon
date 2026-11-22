@@ -13,8 +13,8 @@ func depends_on_registry() -> bool:
 	return true
 
 
-func matches(_environment: PropertyEnvironment) -> bool:
+func matches(context: ConditionContext) -> bool:
 	var script := component_script(type_name, "@ConditionalOnMissingComponent")
-	if script == null:
+	if script == null or context == null:
 		return false
-	return not registry_has(script)
+	return not context.has_type(script)

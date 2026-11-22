@@ -2,13 +2,12 @@ class_name Condition
 extends GDScriptAnnotation
 
 ## A yes-or-no gate read before a definition is registered. Several conditions
-## on the same class or method all have to match. A subclass overrides matches.
-## The container does not special-case the subclass name.
-## registry is the product scripts visible to a depends_on_registry condition.
-var registry: Array = []
+## on the same class or method all have to match. A subclass overrides matches
+## and reads the ConditionContext. The container does not special-case the
+## subclass name.
 
 
-func matches(_environment: PropertyEnvironment) -> bool:
+func matches(_context: ConditionContext) -> bool:
 	return false
 
 
@@ -34,16 +33,6 @@ func component_script(type_name: String, label: String) -> GDScript:
 		return script
 	push_error("IOC: %s type %s is not a global class." % [label, named])
 	return null
-
-
-func registry_has(type: GDScript) -> bool:
-	for entry in registry:
-		var current := entry as GDScript
-		while current != null:
-			if current == type:
-				return true
-			current = current.get_base_script()
-	return false
 
 
 static func type_present(type_name: String) -> bool:

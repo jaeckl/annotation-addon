@@ -8,7 +8,7 @@ var feature: String = ""
 const repeatable := true
 
 
-func matches(_environment: PropertyEnvironment) -> bool:
+func matches(_context: ConditionContext) -> bool:
 	var tag := feature.strip_edges()
 	if tag.is_empty():
 		push_error("IOC: @ConditionalOnFeature needs a feature.")

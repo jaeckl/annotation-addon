@@ -19,7 +19,7 @@ var _field_cache: Dictionary = {}
 var _collection_failed := false
 var _tree: SceneTree
 var _deferred: Array = []
-var _registry_scripts: Array = []
+var _registry_products: Array = []
 var _applying_deferred := false
 var _property_seen: Dictionary = {}
 
@@ -394,7 +394,7 @@ func _apply_deferred() -> void:
 	# decide, and a default cannot count itself.
 	var pending: Array = _deferred.duplicate()
 	_deferred.clear()
-	_registry_scripts = _product_scripts(definitions)
+	_registry_products = definitions.duplicate()
 	_applying_deferred = true
 	for item in pending:
 		var script := item.get("script") as GDScript
@@ -414,41 +414,37 @@ func _apply_deferred() -> void:
 	# A configuration accepted above may have added a property scan root.
 	_bind_scanned_properties()
 	_applying_deferred = false
-	_registry_scripts = []
-
-
-func _product_scripts(source: Array) -> Array:
-	var scripts: Array = []
-	for definition in source:
-		var product := definition as ComponentDefinition
-		if product != null and product.type != null:
-			scripts.append(product.type)
-	return scripts
+	_registry_products = []
 
 
 func _gate(script: GDScript, kind: String, member: StringName = &"") -> String:
 	var found := _conditions(script, kind, member)
-	var registry := false
+	var reads_registry := false
+	var context := _condition_context()
 	for annotation in found:
 		var condition := annotation as Condition
 		if condition == null:
 			return "skip"
 		if condition.depends_on_registry():
-			registry = true
+			reads_registry = true
 			continue
-		if not condition.matches(environment):
+		if not condition.matches(context):
 			return "skip"
-	if registry and not _applying_deferred:
+	if reads_registry and not _applying_deferred:
 		return "defer"
-	if registry:
+	if reads_registry:
 		for annotation in found:
 			var condition := annotation as Condition
 			if condition == null or not condition.depends_on_registry():
 				continue
-			condition.registry = _registry_scripts
-			if not condition.matches(environment):
+			if not condition.matches(context):
 				return "skip"
 	return "ready"
+
+
+func _condition_context() -> ConditionContext:
+	var visible: Array = _registry_products if _applying_deferred else definitions
+	return ConditionContext.new(environment, visible)
 
 
 func _conditions(script: GDScript, kind: String, member: StringName) -> Array:
