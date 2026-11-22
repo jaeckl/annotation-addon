@@ -1,0 +1,15 @@
+; Project for the custom editor at
+; c:\Users\ludwi\Projects\godot\bin\godot.windows.editor.x86_64.console.exe
+; (branch cursor/gdscript-user-annotations-8b9e).
+
+config_version=5
+
+[application]
+
+config/name="Annotation Addon"
+config/features=PackedStringArray("4.8")
+run/main_scene="res://samples/sample.tscn"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/annotation_reflect/plugin.cfg")
