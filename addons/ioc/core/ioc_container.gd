@@ -30,6 +30,11 @@ func setup(tree: SceneTree) -> void:
 	binder = PropertyBinder.new()
 	parsers = [ConfigFilePropertySourceParser.new()]
 	_load_config_directory("res://config")
+	# Files are already ordered. Each add_first beats them. The last add
+	# is the command line, so it wins over the OS and ProjectSettings.
+	environment.add_first(ProjectSettingsPropertySource.new())
+	environment.add_first(OsEnvironmentPropertySource.new())
+	environment.add_first(CommandLinePropertySource.new())
 	if not tree.node_added.is_connected(_on_node_added):
 		tree.node_added.connect(_on_node_added)
 

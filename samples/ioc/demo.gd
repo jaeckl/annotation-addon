@@ -66,13 +66,16 @@ func _ready() -> void:
 	var lookout = camp.get_node("Lookout") if camp != null else null
 	_check(lines, lookout != null and lookout.get("clock") == party.clock and lookout.get("clock_ready"), "factory scene child receives @Inject on enter")
 	var settings := box.environment
-	_check(lines, settings != null and settings.sources.size() == 2, "two cfg files are loaded before the scene")
+	var music_track := _environment_music()
+	var combat_title := _command_title()
+	_check(lines, settings != null and _source_names(settings) == PackedStringArray(["command-line", "os-environment", "project-settings", "res://config/20-local.cfg", "res://config/10-defaults.cfg"]), "command line, OS, and ProjectSettings sit above the cfg files")
 	_check(lines, settings.contains("audio/master") and is_equal_approx(float(settings.get_value("audio/master")), 0.8), "later cfg file wins audio/master")
-	_check(lines, settings.get_value("audio/music") == "town", "earlier cfg file supplies audio/music")
-	_check(lines, settings.get_value("combat/enabled") == true and settings.get_value("combat/title") == "local", "later cfg file supplies its own keys")
+	_check(lines, settings.get_value("audio/music") == music_track, "OS environment overrides audio/music")
+	_check(lines, int(settings.get_value("audio/channels")) == 6, "ProjectSettings overrides audio/channels")
+	_check(lines, settings.get_value("combat/enabled") == true and settings.get_value("combat/title") == combat_title, "command line overrides combat/title")
 	_check(lines, not settings.contains("audio/missing"), "absent key is missing")
-	_check(lines, party.audio != null and party.audio == box.resolve(AudioSettings) and is_equal_approx(party.audio.master, 0.8) and party.audio.music == "town" and party.audio.channels == 2 and party.audio.subtitle == "none" and party.audio.leaked == "keep", "@ConfigurationProperties binds exported fields")
-	_check(lines, party.combat_options != null and party.combat_options.enabled and party.combat_options.title == "local", "RefCounted settings bind from combat/*")
+	_check(lines, party.audio != null and party.audio == box.resolve(AudioSettings) and is_equal_approx(party.audio.master, 0.8) and party.audio.music == music_track and party.audio.channels == 6 and party.audio.subtitle == "none" and party.audio.leaked == "keep", "@ConfigurationProperties keeps the winning value")
+	_check(lines, party.combat_options != null and party.combat_options.enabled and party.combat_options.title == combat_title, "RefCounted settings keep the winning combat/title")
 	_check(lines, not _has_label(box, "BadAudio"), "type mismatch is not published")
 	_check(lines, not _has_label(box, "IgnoredSettings"), "settings outside the scan root are not registered")
 	failed = false
@@ -102,6 +105,28 @@ func _same_members(list: Variant, expected: Array) -> bool:
 		if not list.has(item):
 			return false
 	return true
+
+
+func _source_names(settings: PropertyEnvironment) -> PackedStringArray:
+	var names := PackedStringArray()
+	for source in settings.sources:
+		var origin := source as PropertySource
+		names.append(origin.source_name if origin != null else "")
+	return names
+
+
+func _environment_music() -> String:
+	if OS.has_environment("AUDIO_MUSIC"):
+		return OS.get_environment("AUDIO_MUSIC")
+	return "town"
+
+
+func _command_title() -> String:
+	for argument in OS.get_cmdline_user_args():
+		var text := String(argument)
+		if text.begins_with("--combat/title="):
+			return text.substr("--combat/title=".length())
+	return "local"
 
 
 func _finish(lines: PackedStringArray, failed: bool) -> void:

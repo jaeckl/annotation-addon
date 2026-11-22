@@ -397,7 +397,11 @@ This slice loads `res://config/*.cfg` through `ConfigFile`. Each entry is `secti
 
 `@ConfigurationProperties(prefix="audio")` marks a `Resource` or `RefCounted`. It registers nothing by itself. `@ConfigurationPropertiesScan(root="res://samples/ioc")` on a `@Configuration` class opts in. A script path matches when it equals the root or sits under `root/`. At the end of discover the binder constructs each match, writes `@export` fields, and stores the instance in app scope. A normal `@Component` stays lazy. Fields are `int`, `float`, `bool`, and `String`. The key is `prefix/field`. A missing key keeps the field default. An `int` may fill a `float`. Any other mismatch is a `push_error` and that product is not published. A key with no `@export` field is ignored. A field that is not `@export` is left alone. Gameplay receives the object with `@Inject`.
 
-ProjectSettings, OS environment, command-line args, and `.tres` sources are the following slices. `@ConditionalOnProperty` comes after those and calls `environment.get_value` during registration.
+ProjectSettings, the OS environment, and the command line sit above the files, in that order, with the command line at index 0. `ProjectSettings` uses the same `section/key`. `AUDIO_MASTER` matches `audio/master`, and the value stays the raw string. `--audio/master=0.2` after `--` is a command-line entry. A key none of these set still falls through to the cfg files.
+
+A `PropertyConverter` is the next slice. It sits on the binder, between the raw value and the field write. The binder asks an ordered list. The first converter that accepts the target type and the value produces the stored value. A custom converter is a subclass added to that list, the same kind of policy as `PropertySourceParser`. Settings objects do not take converters through `@Inject`. Binding runs at the end of discover, before gameplay objects exist. Until that slice, a String from the OS or the command line only fills a String field. An `int` may still fill a `float`.
+
+A `.tres` source is the lowest layer after converters. `@ConditionalOnProperty` comes after the sources and calls `environment.get_value` during registration.
 
 ## Out of this plan
 
