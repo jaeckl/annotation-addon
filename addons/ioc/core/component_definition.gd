@@ -11,3 +11,4 @@ var factory: Object
 var method: StringName = &""
 var parameters: Array = []
 var fields: Array = []
+var packed: PackedScene
