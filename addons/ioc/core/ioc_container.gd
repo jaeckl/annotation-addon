@@ -29,8 +29,11 @@ func setup(tree: SceneTree) -> void:
 	environment = PropertyEnvironment.new()
 	binder = PropertyBinder.new()
 	_install_converters()
-	parsers = [ConfigFilePropertySourceParser.new()]
-	_load_config_directory("res://config")
+	parsers = [ResourcePropertySourceParser.new(), ConfigFilePropertySourceParser.new()]
+	# Resources first, then cfg. Each pass inserts at index 0, so the cfg
+	# files end above the .tres files. The last name inside one pass wins.
+	_load_config_directory("res://config", "tres")
+	_load_config_directory("res://config", "cfg")
 	# Files are already ordered. Each add_first beats them. The last add
 	# is the command line, so it wins over the OS and ProjectSettings.
 	environment.add_first(ProjectSettingsPropertySource.new())
@@ -70,13 +73,15 @@ func _extends_script(script: GDScript, base: GDScript) -> bool:
 	return false
 
 
-func _load_config_directory(root: String) -> void:
+func _load_config_directory(root: String, extension: String) -> void:
 	var directory := DirAccess.open(root)
 	if directory == null:
 		return
 	var paths: PackedStringArray = PackedStringArray()
 	for file_name in directory.get_files():
 		var path := root.path_join(String(file_name))
+		if path.get_extension().to_lower() != extension:
+			continue
 		if _parser_for(path) == null:
 			continue
 		paths.append(path)

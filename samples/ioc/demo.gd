@@ -68,17 +68,19 @@ func _ready() -> void:
 	var settings := box.environment
 	var music_track := _environment_music()
 	var combat_title := _command_title()
-	_check(lines, settings != null and _source_names(settings) == PackedStringArray(["command-line", "os-environment", "project-settings", "res://config/20-local.cfg", "res://config/10-defaults.cfg"]), "command line, OS, and ProjectSettings sit above the cfg files")
+	_check(lines, settings != null and _source_names(settings) == PackedStringArray(["command-line", "os-environment", "project-settings", "res://config/20-local.cfg", "res://config/10-defaults.cfg", "res://config/audio_defaults.tres"]), "command line, OS, and ProjectSettings sit above the cfg files")
 	_check(lines, settings.contains("audio/master") and is_equal_approx(float(settings.get_value("audio/master")), 0.8), "later cfg file wins audio/master")
 	_check(lines, settings.get_value("audio/music") == music_track, "OS environment overrides audio/music")
 	_check(lines, int(settings.get_value("audio/channels")) == 6, "ProjectSettings overrides audio/channels")
 	_check(lines, settings.get_value("combat/enabled") == true and settings.get_value("combat/title") == combat_title, "command line overrides combat/title")
 	_check(lines, not settings.contains("audio/missing"), "absent key is missing")
-	_check(lines, party.audio != null and party.audio == box.resolve(AudioSettings) and is_equal_approx(party.audio.master, 0.8) and party.audio.music == music_track and party.audio.channels == 6 and party.audio.subtitle == "none" and party.audio.leaked == "keep", "@ConfigurationProperties keeps the winning value")
+	_check(lines, party.audio != null and party.audio == box.resolve(AudioSettings) and is_equal_approx(party.audio.master, 0.8) and party.audio.music == music_track and party.audio.channels == 6 and party.audio.subtitle == "from-tres" and party.audio.leaked == "keep", "@ConfigurationProperties keeps the winning value")
 	_check(lines, party.combat_options != null and party.combat_options.enabled and party.combat_options.title == combat_title, "RefCounted settings keep the winning combat/title")
 	_check(lines, _converter_order(box), "custom converter sits in front of the scalar converter")
 	_check(lines, typeof(settings.get_value("audio/gain")) == TYPE_STRING and typeof(settings.get_value("audio/muted")) == TYPE_STRING and typeof(settings.get_value("audio/loops")) == TYPE_STRING and typeof(settings.get_value("audio/pace")) == TYPE_STRING, "quoted cfg values stay strings")
 	_check(lines, party.audio != null and is_equal_approx(party.audio.gain, 1.5) and party.audio.muted == false and party.audio.loops == 3 and party.audio.pace == 2, "converters parse strings and the custom pace wins")
+	var cached := load("res://config/audio_defaults.tres") as AudioSettings
+	_check(lines, cached != null and cached != party.audio and is_equal_approx(cached.master, 0.1) and cached.subtitle == "from-tres" and settings.get_value("audio/subtitle") == "from-tres", ".tres supplies a missing key and the cached resource stays unchanged")
 	_check(lines, not _has_label(box, "BadAudio"), "type mismatch is not published")
 	_check(lines, not _has_label(box, "IgnoredSettings"), "settings outside the scan root are not registered")
 	failed = false

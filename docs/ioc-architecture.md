@@ -401,7 +401,9 @@ ProjectSettings, the OS environment, and the command line sit above the files, i
 
 The binder holds an ordered `PropertyConverter` list. The first converter whose `handles` returns true produces the stored value. A result of the wrong type fails the product. `ScalarPropertyConverter` is always last. It passes a matching type through, fills a float from an int, and parses a whole string into an int, a float, or a bool. `"true"` and `"false"` are the only bool spellings. The container installs every other concrete global subclass of `PropertyConverter` in front of that fallback. `PaceConverter` maps `"slow"` and `"fast"` onto an int, which the scalar converter leaves alone. A settings object does not receive a converter through `@Inject`.
 
-A `.tres` source is the lowest layer. `@ConditionalOnProperty` comes after the sources and calls `environment.get_value` during registration.
+`res://config/*.tres` is the lowest layer. The loader duplicates the resource, then flattens each `@export` to `prefix/field` from `@ConfigurationProperties` on its script. A cfg file, `ProjectSettings`, the OS, and the command line still win when they have the same key. The cached `.tres` is left unchanged. A resource without the annotation is skipped after `push_error`.
+
+`@ConditionalOnProperty` comes after the sources and calls `environment.get_value` during registration.
 
 ## Out of this plan
 

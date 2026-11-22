@@ -2,8 +2,9 @@
 class_name AudioSettings
 extends Resource
 
-## Bound from audio/* before the first scene. subtitle has no key, so the
-## default stays. leaked is not @export, so the cfg value does not land.
+## Bound from audio/* before the first scene. subtitle comes from the
+## defaults .tres when no higher source has that key. leaked is not @export,
+## so the cfg value does not land.
 @export var master: float = 1.0
 @export var music: String = "silent"
 @export var channels: int = 8
