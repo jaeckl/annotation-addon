@@ -7,7 +7,7 @@ extends PropertyConverter
 ## converter that sits in front of this one.
 
 
-func handles(target_type: int, value: Variant) -> bool:
+func handles(target_type: int, value: Variant, _target_class: String = "") -> bool:
 	var value_type := typeof(value)
 	if value_type == target_type:
 		return true
@@ -28,7 +28,7 @@ func handles(target_type: int, value: Variant) -> bool:
 			return false
 
 
-func convert(target_type: int, value: Variant) -> Variant:
+func convert(target_type: int, value: Variant, _target_class: String = "") -> Variant:
 	var value_type := typeof(value)
 	if value_type == target_type:
 		return value

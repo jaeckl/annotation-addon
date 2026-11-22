@@ -125,7 +125,7 @@ func _install_converters() -> void:
 		if String(entry.get("language", "")) != "GDScript":
 			continue
 		var script := load(String(entry.get("path", ""))) as GDScript
-		if script == null or script == PropertyConverter or script == ScalarPropertyConverter:
+		if script == null or script == PropertyConverter or script == ScalarPropertyConverter or script == ResourcePropertyConverter:
 			continue
 		if not _extends_script(script, PropertyConverter):
 			continue
@@ -137,6 +137,9 @@ func _install_converters() -> void:
 			push_error("IOC: converter %s produced null." % _script_name(script))
 			continue
 		binder.converters.insert(binder.converters.size() - 1, converter)
+	# After every custom spelling, so a word like "slow" still wins, and
+	# before the scalar converter, so an object is not passed through on type alone.
+	binder.converters.insert(binder.converters.size() - 1, ResourcePropertyConverter.new())
 
 
 func _extends_script(script: GDScript, base: GDScript) -> bool:
