@@ -115,6 +115,15 @@ func _ready() -> void:
 	stage.action = "ui_accept"
 	stage.locale = "zz"
 	_check(lines, not Validator.validate(stage).is_empty(), "locale rejects an unknown locale")
+	var card := PreparedCard.new()
+	var call_args: Array = ["  Town  "]
+	_check(lines, Preparer.prepare(card, call_args) and card.label == "too loud" and is_equal_approx(card.gain, 1.0) and card.pace == 4 and card.scene == "res://samples/ioc/demo.tscn" and is_equal_approx(card.volume, 1.0) and card.code == "TOWN" and call_args[0] == "[town]", "preparations rewrite strings, numbers, a path, and a constructor argument in source order")
+	var heading := Heading.new()
+	_check(lines, Preparer.prepare(heading) and heading.direction.is_equal_approx(Vector2(0.6, 0.8)) and heading.idle == Vector2.ZERO and heading.velocity.is_equal_approx(Vector3(2, 0, 0)), "normalize and limit length rewrite vectors")
+	var broken := BrokenGain.new()
+	_check(lines, not Preparer.prepare(broken) and is_equal_approx(broken.gain, 1.0), "a round step of 0 leaves the value and fails")
+	var prepared_banner := box.resolve(PreparedBanner)
+	_check(lines, prepared_banner != null and prepared_banner.title == "town" and is_equal_approx(prepared_banner.volume, 1.0) and not _has_label(box, "RejectedBanner"), "preparation runs before validation and a bad result is not published")
 	_check(lines, not _has_label(box, "IgnoredSettings"), "settings outside the scan root are not registered")
 	_check(lines, box.resolve(RaidBanner) != null and box.resolve(CombatFlag) != null and box.resolve(QuietMatch) != null and box.resolve(MissingOn) != null and box.resolve(OpenGate) != null and box.resolve(BothOpen) != null, "matching property conditions register")
 	_check(lines, not _has_label(box, "PeaceBanner") and not _has_label(box, "QuietFlag") and not _has_label(box, "MissingOff") and not _has_label(box, "PresentButWrong") and not _has_label(box, "BothGates"), "failed property conditions stay unregistered")

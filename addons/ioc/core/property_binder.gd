@@ -41,6 +41,8 @@ func bind(instance: Object, prefix: String, environment: PropertyEnvironment) ->
 		if not converted["ok"]:
 			return false
 		instance.set(StringName(property_name), converted["value"])
+	if not _passes_prepare(instance, script):
+		return false
 	return _passes_validation(instance, script)
 
 
@@ -62,10 +64,23 @@ func _supported(type_code: int) -> bool:
 	return type_code == TYPE_INT or type_code == TYPE_FLOAT or type_code == TYPE_BOOL or type_code == TYPE_STRING
 
 
+func _passes_prepare(instance: Object, script: GDScript) -> bool:
+	# The prepare addon is optional. A missing Preparer skips the rewrite.
+	# This file does not name that class, so the binder still parses without it.
+	var preparer := _global_script("Preparer")
+	if preparer == null:
+		return true
+	var prepared: Variant = preparer.call(&"prepare", instance)
+	if prepared is bool and prepared:
+		return true
+	push_error("IOC: %s failed preparation." % _script_name(script))
+	return false
+
+
 func _passes_validation(instance: Object, script: GDScript) -> bool:
 	# The validation addon is optional. A missing Validator skips the check.
 	# This file does not name that class, so the binder still parses without it.
-	var validator := _validation_script()
+	var validator := _global_script("Validator")
 	if validator == null:
 		return true
 	var violations: Variant = validator.call(&"validate", instance)
@@ -80,9 +95,9 @@ func _passes_validation(instance: Object, script: GDScript) -> bool:
 	return false
 
 
-func _validation_script() -> GDScript:
+func _global_script(global_name: String) -> GDScript:
 	for entry in ProjectSettings.get_global_class_list():
-		if String(entry.get("class", "")) != "Validator":
+		if String(entry.get("class", "")) != global_name:
 			continue
 		if String(entry.get("language", "")) != "GDScript":
 			return null
