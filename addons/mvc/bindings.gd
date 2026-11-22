@@ -1,8 +1,9 @@
 class_name Bindings
 extends RefCounted
 
-## text, field, and property start listening. The next line calls from, because
-## GDScript evaluates arguments before the call.
+## text, field, property, and error start listening. The next line calls from,
+## because GDScript evaluates arguments before the call. error listens to the
+## message kept when a property is rejected.
 
 
 static func text(label: Label) -> TextBinding:
@@ -18,6 +19,11 @@ static func field(line: LineEdit) -> FieldBinding:
 static func property(node: Node, path: NodePath) -> ValueBinding:
 	PropNotify.arm()
 	return ValueBinding.new(node, path)
+
+
+static func error(label: Label) -> ErrorBinding:
+	PropNotify.arm()
+	return ErrorBinding.new(label)
 
 
 static func on(source: Signal) -> SignalBinding:
@@ -130,9 +136,7 @@ class FieldBinding:
 	func _on_text(next: String) -> void:
 		if _writing or not is_instance_valid(_owner):
 			return
-		_writing = true
 		_owner.set(_property, _coerce(next, _sample))
-		_writing = false
 
 
 	func _write(next: String) -> void:
@@ -226,3 +230,37 @@ class SignalBinding:
 		var error := source.connect(callback)
 		if error != OK:
 			push_error("MVC: %s cannot listen to %s." % [who, signal_name])
+
+
+class ErrorBinding:
+	extends RefCounted
+
+	var label: Label
+	var _open := true
+
+
+	func _init(target: Label) -> void:
+		label = target
+
+
+	func from(_value: Variant) -> void:
+		_open = false
+		var target_name := "error"
+		if label != null:
+			target_name = String(label.name) if not String(label.name).is_empty() else label.get_class()
+		var read := Bindings._one_read(target_name)
+		if read.is_empty() or label == null:
+			if label == null:
+				push_error("MVC: error needs a label.")
+			return
+		var owner: Object = read["owner"]
+		var property: StringName = read["property"]
+		PropNotify.listen_error(owner, property, func(message: String) -> void:
+			if is_instance_valid(label):
+				label.text = message
+		)
+
+
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_PREDELETE and _open:
+			PropNotify.disarm()

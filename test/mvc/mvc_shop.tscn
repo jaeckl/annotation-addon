@@ -13,4 +13,7 @@ unique_name_in_owner = true
 
 [node name="Header" type="Control" parent="."]
 
+[node name="error_label" type="Label" parent="."]
+unique_name_in_owner = true
+
 [node name="title_label" type="Label" parent="Header"]

@@ -25,6 +25,8 @@ func before_ready(instance: Object) -> void:
 		_conceal(instance)
 	if _marked(script, Model) and not _marked(script, Component):
 		push_error("MVC: %s is @Model without @Component." % _type_name(script))
+	if _has_handler(script) and not _marked(script, Controller):
+		push_error("MVC: %s handles validation on a non-controller." % _type_name(script))
 	if _marked(script, Controller):
 		_arm_controller(instance, script)
 
@@ -53,6 +55,7 @@ func _arm_controller(instance: Object, script: GDScript) -> void:
 			push_error("MVC: %s injects more than one view." % label)
 		return
 	_bind_fields(instance, script, views[0] as Node, label)
+	_watch_errors(instance, script)
 	_conceal(views[0])
 
 
@@ -122,6 +125,77 @@ func _marked(script: GDScript, annotation: GDScript) -> bool:
 			return true
 		current = current.get_base_script()
 	return false
+
+
+func _has_handler(script: GDScript) -> bool:
+	var current := script
+	while current != null:
+		var bucket := {"found": false}
+		AnnotationUtils.for_each_annotation_initialized(ValidationErrorHandler, current, _note_handler.bind(bucket))
+		if bool(bucket["found"]):
+			return true
+		current = current.get_base_script()
+	return false
+
+
+func _note_handler(_annotation: Object, _target: Object, bucket: Dictionary) -> void:
+	bucket["found"] = true
+
+
+func _watch_errors(instance: Object, script: GDScript) -> void:
+	var models := _injected(instance)
+	var current := script
+	while current != null:
+		var bucket := {"script": current, "methods": []}
+		AnnotationUtils.for_each_annotation_initialized(ValidationErrorHandler, current, _take_handler.bind(bucket))
+		var methods: Array = bucket["methods"]
+		for method_name in methods:
+			var callback := Callable(instance, StringName(String(method_name)))
+			for model in models:
+				PropNotify.listen_owner(model, callback)
+		current = current.get_base_script()
+
+
+func _take_handler(_annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var script := bucket["script"] as GDScript
+	var label := _type_name(script)
+	if not (target is FunctionInfo):
+		push_error("MVC: @ValidationErrorHandler on %s belongs on a method." % label)
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		push_error("MVC: %s.%s is static and cannot handle validation." % [label, info.name])
+		return
+	if _method_args(script, info.name).size() != 1:
+		push_error("MVC: %s.%s must take one Violation." % [label, info.name])
+		return
+	var methods: Array = bucket["methods"]
+	methods.append(String(info.name))
+
+
+func _method_args(script: GDScript, method: StringName) -> Array:
+	for info in script.get_script_method_list():
+		if StringName(info.get("name", "")) != method:
+			continue
+		return info.get("args", [])
+	return []
+
+
+func _injected(instance: Object) -> Array:
+	var found: Array = []
+	var seen := {}
+	for property in instance.get_property_list():
+		if (int(property.get("usage", 0)) & PROPERTY_USAGE_SCRIPT_VARIABLE) == 0:
+			continue
+		var value: Variant = instance.get(StringName(String(property.get("name", ""))))
+		if not (value is Object) or not is_instance_valid(value):
+			continue
+		var id := (value as Object).get_instance_id()
+		if seen.has(id):
+			continue
+		seen[id] = true
+		found.append(value)
+	return found
 
 
 func _type_name(script: GDScript) -> String:

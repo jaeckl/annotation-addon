@@ -20,6 +20,19 @@ static func validate(instance: Object, arguments: Array = []) -> Array:
 	return collector.violations
 
 
+## One field, using the value the caller already has. A setter calls this
+## so the check does not read the field back.
+static func validate_member(script: GDScript, member_name: StringName, value: Variant) -> Array:
+	if script == null:
+		return []
+	var checker := _MemberCheck.new(String(member_name), value)
+	var current := script
+	while current != null:
+		AnnotationUtils.for_each_annotation_initialized(Constraint, current, checker.take)
+		current = current.get_base_script()
+	return checker.violations
+
+
 class _Collector:
 	extends RefCounted
 
@@ -62,3 +75,30 @@ class _Collector:
 		if info == null:
 			return -1
 		return info.arguments.find(String(parameter.name))
+
+
+class _MemberCheck:
+	extends RefCounted
+
+	var member: String
+	var value: Variant
+	var violations: Array = []
+
+	func _init(member_name: String, candidate: Variant) -> void:
+		member = member_name
+		value = candidate
+
+	func take(annotation: Object, target: Object) -> void:
+		var constraint := annotation as Constraint
+		if constraint == null or not (target is VariableInfo):
+			return
+		var variable := target as VariableInfo
+		if variable.is_static or String(variable.name) != member:
+			return
+		if constraint.is_valid(value):
+			return
+		var script := constraint.get_script() as GDScript
+		var constraint_name := "Constraint"
+		if script != null and not String(script.get_global_name()).is_empty():
+			constraint_name = String(script.get_global_name())
+		violations.append(Violation.new(member, constraint_name, constraint.violation_message(value)))

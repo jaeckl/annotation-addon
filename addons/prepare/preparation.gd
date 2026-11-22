@@ -13,7 +13,21 @@ func apply(candidate: Variant) -> Variant:
 func fail(message: String) -> void:
 	push_error(message)
 	set_meta(&"prepare_failed", true)
+	set_meta(&"prepare_message", message)
 
 
 func failed() -> bool:
 	return has_meta(&"prepare_failed")
+
+
+func reset() -> void:
+	if has_meta(&"prepare_failed"):
+		remove_meta(&"prepare_failed")
+	if has_meta(&"prepare_message"):
+		remove_meta(&"prepare_message")
+
+
+func failure_message() -> String:
+	if has_meta(&"prepare_message"):
+		return String(get_meta(&"prepare_message"))
+	return ""
