@@ -83,6 +83,9 @@ func _ready() -> void:
 	_check(lines, cached != null and cached != party.audio and is_equal_approx(cached.master, 0.1) and cached.subtitle == "from-tres" and settings.get_value("audio/subtitle") == "from-tres", ".tres supplies a missing key and the cached resource stays unchanged")
 	_check(lines, not _has_label(box, "BadAudio"), "type mismatch is not published")
 	_check(lines, not _has_label(box, "IgnoredSettings"), "settings outside the scan root are not registered")
+	_check(lines, box.resolve(RaidBanner) != null and box.resolve(CombatFlag) != null and box.resolve(QuietMatch) != null and box.resolve(MissingOn) != null and box.resolve(OpenGate) != null and box.resolve(BothOpen) != null, "matching property conditions register")
+	_check(lines, not _has_label(box, "PeaceBanner") and not _has_label(box, "QuietFlag") and not _has_label(box, "MissingOff") and not _has_label(box, "PresentButWrong") and not _has_label(box, "BothGates"), "failed property conditions stay unregistered")
+	_check(lines, not _has_label(box, "GateFactory.shut") and box.configuration(ClosedFactory) == null and not _has_label(box, "ClosedFactory.ghost") and not _has_label(box, "HiddenAudio"), "a failed condition skips the factory method, the configuration, and the settings object")
 	failed = false
 	for line in lines:
 		if String(line).begins_with("FAIL"):

@@ -164,7 +164,7 @@ The container calls a policy object. It does not contain a second copy of the ru
 | --- | --- | --- |
 | `QualifierMatcher` | Same annotation class, same attribute values. Each required annotation needs one match. | A subclass of `Qualifier` needs no new matcher. One global subclass of `QualifierMatcher` replaces the default. |
 | `CandidateSelector` | Assignable type, then the matcher. Zero or several remaining definitions fail. | One global subclass replaces the default. That is where a primary rule would live. The default has none. |
-| `Condition` | The annotation's `matches` method. | A subclass such as `@ConditionalOnSetting` is the check. The container calls `matches` on each one it finds. |
+| `Condition` | The annotation's `matches` method. | A subclass such as `@ConditionalOnProperty` is the check. The container calls `matches` on each one it finds. |
 | `ScopeHandler` | `AppScope` and `SceneScope`. | Every concrete global subclass is installed, including the two built-ins. `@Component.scope` names the handler script. |
 
 Policy classes are found in the global class list before any product is registered. A policy class is not a product. `@Component` on it is ignored. Zero user subclasses of `QualifierMatcher` or `CandidateSelector` keeps the built-in. Two user subclasses of either one fail at startup and name both scripts. `ScopeHandler` does not use that replacement rule, because App and Scene stay present when a user adds another handler.
@@ -185,7 +185,7 @@ sequenceDiagram
     Loop->>Box: install every ScopeHandler subclass
 ```
 
-`Condition` is the base for later checks (`ConditionalOnSetting`, `ConditionalOnType`, `ConditionalOnNode`). The container does not special-case each name. It asks each condition annotation on the target whether the definition may be registered.
+`Condition` is the base. `@ConditionalOnProperty` is the first check. `@ConditionalOnFeature`, `@ConditionalOnClass`, `@ConditionalOnComponent`, `@ConditionalOnResource`, and `@ConditionalOnNode` are later subclasses. The container does not special-case each name. It asks each condition annotation on the target whether the definition may be registered.
 
 `ComponentDefinition.type` is the component script, or the factory method's declared return type. `qualifiers` is every annotation on that class or method that extends `Qualifier`, each with its attributes. The container keeps a list of definitions. It does not key that list by exact script, because a request for a parent type must see every subclass.
 
@@ -403,8 +403,10 @@ The binder holds an ordered `PropertyConverter` list. The first converter whose 
 
 `res://config/*.tres` is the lowest layer. The loader duplicates the resource, then flattens each `@export` to `prefix/field` from `@ConfigurationProperties` on its script. A cfg file, `ProjectSettings`, the OS, and the command line still win when they have the same key. The cached `.tres` is left unchanged. A resource without the annotation is skipped after `push_error`.
 
-`@ConditionalOnProperty` comes after the sources and calls `environment.get_value` during registration.
+`@ConditionalOnProperty` reads one environment key while a class, a factory method, or a settings object is registered. It does not resolve the bound settings object. An empty `having_value` matches a present value other than false. `having_value` compares a bool as `true` or `false`, ignoring case, and compares every other value as text. `match_if_missing` matches only when the key is absent. A present value is still compared. Several conditions on the same target all have to match. A failed check skips that definition and does not push an error. A failed check on a `@Configuration` class skips its factory methods and its property scan. The annotation is repeatable.
+
+`@ConditionalOnFeature`, `@ConditionalOnClass`, `@ConditionalOnMissingClass`, `@ConditionalOnComponent`, `@ConditionalOnMissingComponent`, `@ConditionalOnResource`, and `@ConditionalOnNode` are the later checks. `@ConditionalOnNode` waits until a scene root enters.
 
 ## Out of this plan
 
-Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. Concrete `@ConditionalOn*` checks wait until the property slices can feed them. Each one is a subclass of `Condition`. Profile comparison is a later policy of that same shape. Neither becomes a branch inside the container.
+Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. `@ConditionalOnFeature` is the later form of a profile check, using `OS.has_feature`. The other `@ConditionalOn*` checks stay later subclasses of `Condition`. None of them becomes a branch inside the container.

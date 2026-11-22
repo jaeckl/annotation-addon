@@ -217,6 +217,8 @@ func _scan(script: GDScript) -> void:
 
 
 func _register_configuration(script: GDScript) -> void:
+	if not _conditions_match(script, "script"):
+		return
 	if not script.can_instantiate():
 		push_error("IOC: configuration %s cannot be constructed." % _script_name(script))
 		return
@@ -269,6 +271,8 @@ func _under_property_root(script: GDScript) -> bool:
 
 
 func _register_property_product(script: GDScript) -> void:
+	if not _conditions_match(script, "script"):
+		return
 	if _class_product(script) != null:
 		push_error("IOC: %s is @Component and @ConfigurationProperties." % _script_name(script))
 		return
@@ -321,6 +325,8 @@ func _take_configuration_component(annotation: Object, target: Object, bucket: D
 		if info.is_static:
 			push_error("IOC: %s.%s is static. Factory methods are called on the configuration instance." % [_script_name(script), info.name])
 			return
+		if not _conditions_match(script, "func", info.name):
+			return
 		_register_method(script, bucket["factory"], info.name)
 		return
 	push_error("IOC: @Component on %s is not a class or a factory method." % _script_name(script))
@@ -341,6 +347,8 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 
 
 func _register_class_product(script: GDScript) -> void:
+	if not _conditions_match(script, "script"):
+		return
 	if not script.can_instantiate():
 		push_error("IOC: component %s cannot be constructed." % _script_name(script))
 		return
@@ -351,6 +359,22 @@ func _register_class_product(script: GDScript) -> void:
 	if fields == null:
 		return
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
+
+
+func _conditions_match(script: GDScript, kind: String, member: StringName = &"") -> bool:
+	var found: Array = []
+	var bucket := {"kind": kind, "member": member, "found": found}
+	AnnotationUtils.for_each_annotation_initialized(Condition, script, _take_condition.bind(bucket))
+	for annotation in found:
+		var condition := annotation as Condition
+		if condition == null or not condition.matches(environment):
+			return false
+	return true
+
+
+func _take_condition(annotation: Object, target: Object, bucket: Dictionary) -> void:
+	if _is_qualifier_target(target, String(bucket["kind"]), bucket["member"], &""):
+		bucket["found"].append(annotation)
 
 
 func _reject_orphan_methods(script: GDScript) -> void:
