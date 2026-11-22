@@ -57,6 +57,8 @@ var _pooled: Dictionary = {}
 var _pool_free: Dictionary = {}
 var _pool_live: Dictionary = {}
 var _pool_known: Dictionary = {}
+var _pool_limit: Dictionary = {}
+var _pool_release: Dictionary = {}
 var _pool_moving := false
 
 
@@ -97,6 +99,8 @@ func shutdown() -> void:
 	_pool_free.clear()
 	_pool_live.clear()
 	_pool_known.clear()
+	_pool_limit.clear()
+	_pool_release.clear()
 	if _tree.node_added.is_connected(_on_node_added):
 		_tree.node_added.disconnect(_on_node_added)
 	if _tree.node_removed.is_connected(_on_node_removed):
@@ -189,6 +193,8 @@ func discover() -> void:
 	_pool_free.clear()
 	_pool_live.clear()
 	_pool_known.clear()
+	_pool_limit.clear()
+	_pool_release.clear()
 	for entry in ProjectSettings.get_global_class_list():
 		if String(entry.get("language", "")) != "GDScript":
 			continue
@@ -553,6 +559,10 @@ func borrow_pooled(type: GDScript, parent: Node) -> Object:
 	var scene_id := root.get_instance_id()
 	var instance: Object = _take_parked(scene_id, type)
 	if instance == null:
+		var limit := int(_pool_limit.get(type, 0))
+		if limit > 0 and _pool_held(scene_id, type) >= limit:
+			push_error("IOC: %s is at its limit of %s." % [_script_name(type), limit])
+			return null
 		instance = _construct(definition, parent)
 		if instance == null:
 			return null
@@ -584,10 +594,32 @@ func release_pooled(instance: Object) -> void:
 		if instance is Node and is_instance_valid(instance):
 			(instance as Node).queue_free()
 		return
+	_call_on_release(instance, script)
+	if not is_instance_valid(instance) or not _pool_known.has(id):
+		return
+	if instance is Node and (instance as Node).is_queued_for_deletion():
+		return
 	if instance is Node:
 		_park_node(instance as Node, root)
 	var waiting := _free_list(scene_id, script)
 	waiting.append(instance)
+
+
+func _pool_held(scene_id: int, script: GDScript) -> int:
+	var held := _free_list(scene_id, script).size()
+	for id in _pool_live.keys():
+		var meta: Dictionary = _pool_known.get(id, {})
+		if meta.get("script") != script or int(meta.get("scene_id", -1)) != scene_id:
+			continue
+		held += 1
+	return held
+
+
+func _call_on_release(instance: Object, script: GDScript) -> void:
+	for method_name in _pool_release.get(script, []):
+		var result: Variant = instance.call(method_name)
+		if _is_suspended(result):
+			push_error("IOC: %s.%s cannot await." % [_script_name(script), method_name])
 
 
 func _take_parked(scene_id: int, script: GDScript) -> Object:
@@ -1729,6 +1761,7 @@ func _scan(script: GDScript) -> void:
 	_reject_misplaced_async(script)
 	_reject_misplaced_advice(script)
 	_reject_misplaced_pooled(script)
+	_reject_misplaced_release(script)
 	if AnnotationUtils.has_annotation(script, Configuration):
 		if AnnotationUtils.has_annotation(script, Pooled):
 			push_error("IOC: %s is @Pooled on a configuration." % _script_name(script))
@@ -1756,6 +1789,52 @@ func _take_pooled(_annotation: Object, target: Object, script: GDScript) -> void
 	push_error("IOC: @Pooled on %s belongs on a class." % _script_name(script))
 
 
+func _pool_limit_of(script: GDScript) -> int:
+	var mark: Variant = AnnotationUtils.get_annotation_initialized(script, Pooled)
+	if not (mark is Object):
+		return 0
+	var limit := int(mark.get("limit"))
+	if limit < 0:
+		push_error("IOC: %s pool limit must be at least 0." % _script_name(script))
+	return limit
+
+
+func _reject_misplaced_release(script: GDScript) -> void:
+	var pooled := AnnotationUtils.has_annotation(script, Pooled)
+	AnnotationUtils.for_each_annotation_initialized(OnRelease, script, _take_release_mark.bind(script, pooled))
+
+
+func _take_release_mark(_annotation: Object, target: Object, script: GDScript, pooled: bool) -> void:
+	if not (target is FunctionInfo):
+		push_error("IOC: @OnRelease on %s belongs on a method." % _script_name(script))
+		return
+	if pooled:
+		return
+	var info := target as FunctionInfo
+	push_error("IOC: %s.%s is @OnRelease and %s is not pooled." % [_script_name(script), info.name, _script_name(script)])
+
+
+func _collect_release(script: GDScript) -> Array:
+	var found: Array = []
+	var bucket := {"script": script, "found": found}
+	AnnotationUtils.for_each_annotation_initialized(OnRelease, script, _take_release_method.bind(bucket))
+	return found
+
+
+func _take_release_method(_annotation: Object, target: Object, bucket: Dictionary) -> void:
+	if not (target is FunctionInfo):
+		return
+	var script := bucket["script"] as GDScript
+	var info := target as FunctionInfo
+	if info.is_static:
+		push_error("IOC: %s.%s is static and cannot reset a pool." % [_script_name(script), info.name])
+		return
+	if _method_args(script, info.name).size() != 0:
+		push_error("IOC: %s.%s must take nothing." % [_script_name(script), info.name])
+		return
+	bucket["found"].append(info.name)
+
+
 func _register_pooled(script: GDScript) -> void:
 	var decision := _gate(script, "script")
 	if decision == "scene":
@@ -1777,6 +1856,11 @@ func _register_pooled(script: GDScript) -> void:
 	_collect_input(script, true)
 	_collect_actions(script, true)
 	_collect_signals(script, true)
+	var limit := _pool_limit_of(script)
+	if limit < 0:
+		return
+	_pool_limit[script] = limit
+	_pool_release[script] = _collect_release(script)
 	var definition := ComponentDefinition.new()
 	definition.type = script
 	definition.qualifiers = _qualifiers(script, "script", &"", &"")

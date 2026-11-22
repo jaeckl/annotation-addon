@@ -13,7 +13,7 @@ func before_each() -> void:
 		if err.handled:
 			continue
 		var text := "%s %s" % [err.code, err.rationale]
-		if text.find("Pooled") != -1:
+		if text.find("Pooled") != -1 or text.find("OnRelease") != -1 or text.find("pool limit") != -1 or text.find("reset a pool") != -1 or text.find("must take nothing") != -1:
 			pooled_errors.append(text)
 		err.handled = true
 
@@ -23,7 +23,7 @@ func after_each() -> void:
 		box.shutdown()
 	box = null
 	for child in get_tree().root.get_children():
-		if child.name == "AsyncRoom" or child.name == "Loose" or child is PoolBolt:
+		if child.name == "AsyncRoom" or child.name == "Loose" or child is PoolBolt or child is PoolReleaseWait:
 			child.free()
 
 
@@ -150,6 +150,63 @@ func test_pooled_on_a_method_is_rejected() -> void:
 
 func test_pooled_on_a_configuration_is_rejected() -> void:
 	assert_true(_has("PoolConfig is @Pooled on a configuration."), "a configuration is not a pool")
+
+
+func test_a_cap_stops_a_new_borrow() -> void:
+	var room := _room()
+	var pools := box.resolve(InstancePools) as InstancePools
+	var first := pools.borrow(PoolCap, room) as PoolCap
+	var second := pools.borrow(PoolCap, room) as PoolCap
+	assert_not_null(first, "the first borrow is inside the cap")
+	assert_not_null(second, "the second borrow fills the cap")
+	assert_null(pools.borrow(PoolCap, room), "a third borrow does not build another instance")
+	assert_engine_error("PoolCap is at its limit of 2.")
+	pools.release(first)
+	var again := pools.borrow(PoolCap, room) as PoolCap
+	assert_eq(again, first, "a parked instance is still available at the cap")
+
+
+func test_release_clears_the_instance() -> void:
+	var room := _room()
+	var pools := box.resolve(InstancePools) as InstancePools
+	var shot := pools.borrow(PoolReset, room) as PoolReset
+	shot.token = 5
+	pools.release(shot)
+	assert_eq(shot.token, 0, "the hook clears the shot")
+	assert_eq(shot.clears, 1, "release calls the hook once")
+	var again := pools.borrow(PoolReset, room) as PoolReset
+	assert_eq(again, shot, "the same object comes back")
+	assert_eq(again.clears, 1, "borrow does not call the hook")
+	assert_eq(again.token, 0, "the cleared field stays cleared")
+
+
+func test_an_awaiting_release_is_rejected() -> void:
+	var room := _room()
+	var pools := box.resolve(InstancePools) as InstancePools
+	var shot := pools.borrow(PoolReleaseWait, room)
+	pools.release(shot)
+	assert_engine_error("PoolReleaseWait.linger cannot await.")
+	await get_tree().process_frame
+
+
+func test_a_negative_limit_is_rejected() -> void:
+	assert_true(_has("PoolLimitBad pool limit must be at least 0."), "a negative cap is refused")
+
+
+func test_on_release_must_take_nothing() -> void:
+	assert_true(_has("PoolReleaseBad.clear must take nothing."), "a reset method takes nothing")
+
+
+func test_a_static_on_release_is_rejected() -> void:
+	assert_true(_has("PoolReleaseBad.parked is static and cannot reset a pool."), "a static method has no instance")
+
+
+func test_on_release_on_a_normal_component_is_rejected() -> void:
+	assert_true(_has("PoolReleasePlain.clear is @OnRelease and PoolReleasePlain is not pooled."), "the hook belongs to a pool")
+
+
+func test_on_release_on_a_class_is_rejected() -> void:
+	assert_true(_has("@OnRelease on PoolReleaseClass belongs on a method."), "the hook is a method mark")
 
 
 func _room() -> Node:
