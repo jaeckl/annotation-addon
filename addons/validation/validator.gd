@@ -68,7 +68,7 @@ class _Collector:
 		var constraint_name := "Constraint"
 		if script != null and not String(script.get_global_name()).is_empty():
 			constraint_name = String(script.get_global_name())
-		violations.append(Violation.new(member_name, constraint_name, constraint.violation_message(candidate)))
+		violations.append(Violation.new(member_name, constraint_name, constraint.violation_message(candidate), candidate))
 
 	func _argument_index(parameter: ParameterInfo) -> int:
 		var info := ReflectionUtils.get_function_info(parameter.gdscript, parameter.function)
@@ -101,4 +101,4 @@ class _MemberCheck:
 		var constraint_name := "Constraint"
 		if script != null and not String(script.get_global_name()).is_empty():
 			constraint_name = String(script.get_global_name())
-		violations.append(Violation.new(member, constraint_name, constraint.violation_message(value)))
+		violations.append(Violation.new(member, constraint_name, constraint.violation_message(value), value))

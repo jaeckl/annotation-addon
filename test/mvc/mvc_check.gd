@@ -11,12 +11,14 @@ extends RefCounted
 @Bind(^"Header/title_label") var title_label: Label
 
 var hits: Array = []
+var attempts: Array = []
 var trap := false
 
 
 @ValidationErrorHandler
 func rejected(violation: Violation) -> void:
 	hits.append(String(violation.member))
+	attempts.append(violation.value)
 	if trap and String(violation.member) == "gold":
 		trap = false
 		model.gold = 3

@@ -1,28 +1,24 @@
 class_name Bindings
 extends RefCounted
 
-## text, field, property, and error start listening. The next line calls from,
+## text, field, property, and error are binders. The next line calls from,
 ## because GDScript evaluates arguments before the call. error listens to the
-## message kept when a property is rejected.
+## message kept when a property is rejected. A custom control extends Binder.
 
 
 static func text(label: Label) -> TextBinding:
-	PropNotify.arm()
 	return TextBinding.new(label)
 
 
 static func field(line: LineEdit) -> FieldBinding:
-	PropNotify.arm()
 	return FieldBinding.new(line)
 
 
 static func property(node: Node, path: NodePath) -> ValueBinding:
-	PropNotify.arm()
 	return ValueBinding.new(node, path)
 
 
 static func error(label: Label) -> ErrorBinding:
-	PropNotify.arm()
 	return ErrorBinding.new(label)
 
 
@@ -60,45 +56,37 @@ static func _global_name(object: Object) -> String:
 
 
 class TextBinding:
-	extends RefCounted
+	extends Binder
 
 	var label: Label
-	var _open := true
 
 
 	func _init(target: Label) -> void:
 		label = target
+		super()
 
 
-	func from(value: Variant) -> void:
-		_open = false
-		var target_name := "text"
-		if label != null:
-			target_name = String(label.name) if not String(label.name).is_empty() else label.get_class()
-		var read := Bindings._one_read(target_name)
-		if read.is_empty() or label == null:
-			if label == null:
-				push_error("MVC: text needs a label.")
-			return
-		var owner: Object = read["owner"]
-		var property: StringName = read["property"]
-		label.text = str(value)
-		PropNotify.listen(owner, property, func(next: Variant) -> void:
-			if is_instance_valid(label):
-				label.text = str(next)
-		)
+	func _node() -> Node:
+		return label
 
 
-	func _notification(what: int) -> void:
-		if what == NOTIFICATION_PREDELETE and _open:
-			PropNotify.disarm()
+	func _kind() -> String:
+		return "text"
+
+
+	func _absent() -> String:
+		return "MVC: text needs a label."
+
+
+	func _show(next: Variant) -> void:
+		if is_instance_valid(label):
+			label.text = str(next)
 
 
 class FieldBinding:
-	extends RefCounted
+	extends Binder
 
 	var line: LineEdit
-	var _open := true
 	var _writing := false
 	var _owner: Object
 	var _property: StringName
@@ -107,20 +95,22 @@ class FieldBinding:
 
 	func _init(target: LineEdit) -> void:
 		line = target
+		super()
 
 
-	func from(value: Variant) -> void:
-		_open = false
-		var target_name := "field"
-		if line != null:
-			target_name = String(line.name) if not String(line.name).is_empty() else line.get_class()
-		var read := Bindings._one_read(target_name)
-		if read.is_empty() or line == null:
-			if line == null:
-				push_error("MVC: field needs a line.")
-			return
-		var owner: Object = read["owner"]
-		var property: StringName = read["property"]
+	func _node() -> Node:
+		return line
+
+
+	func _kind() -> String:
+		return "field"
+
+
+	func _absent() -> String:
+		return "MVC: field needs a line."
+
+
+	func _attach(owner: Object, property: StringName, value: Variant) -> void:
 		_owner = owner
 		_property = property
 		_sample = value
@@ -129,7 +119,7 @@ class FieldBinding:
 			if is_instance_valid(line):
 				_write(str(next))
 		)
-		if not line.text_changed.is_connected(_on_text):
+		if line != null and not line.text_changed.is_connected(_on_text):
 			line.text_changed.connect(_on_text)
 
 
@@ -159,38 +149,35 @@ class FieldBinding:
 				return next
 
 
-	func _notification(what: int) -> void:
-		if what == NOTIFICATION_PREDELETE and _open:
-			PropNotify.disarm()
-
-
 class ValueBinding:
-	extends RefCounted
+	extends Binder
 
 	var node: Node
 	var path: NodePath
-	var _open := true
 
 
 	func _init(target: Node, property_path: NodePath) -> void:
 		node = target
 		path = property_path
+		super()
 
 
-	func from(value: Variant) -> void:
-		_open = false
-		var target_name := "property"
-		if node != null:
-			target_name = String(node.name) if not String(node.name).is_empty() else node.get_class()
-		var read := Bindings._one_read(target_name)
-		if read.is_empty() or node == null:
-			if node == null:
-				push_error("MVC: property needs a node.")
-			return
+	func _node() -> Node:
+		return node
+
+
+	func _kind() -> String:
+		return "property"
+
+
+	func _absent() -> String:
+		return "MVC: property needs a node."
+
+
+	func _attach(owner: Object, property: StringName, value: Variant) -> void:
 		var indexed := _indexed(path)
-		var owner: Object = read["owner"]
-		var property: StringName = read["property"]
-		node.set_indexed(indexed, value)
+		if node != null:
+			node.set_indexed(indexed, value)
 		PropNotify.listen(owner, property, func(next: Variant) -> void:
 			if is_instance_valid(node):
 				node.set_indexed(indexed, next)
@@ -203,9 +190,34 @@ class ValueBinding:
 		return NodePath(":%s" % String(property_path))
 
 
-	func _notification(what: int) -> void:
-		if what == NOTIFICATION_PREDELETE and _open:
-			PropNotify.disarm()
+class ErrorBinding:
+	extends Binder
+
+	var label: Label
+
+
+	func _init(target: Label) -> void:
+		label = target
+		super()
+
+
+	func _node() -> Node:
+		return label
+
+
+	func _kind() -> String:
+		return "error"
+
+
+	func _absent() -> String:
+		return "MVC: error needs a label."
+
+
+	func _attach(owner: Object, property: StringName, _value: Variant) -> void:
+		PropNotify.listen_error(owner, property, func(message: String) -> void:
+			if is_instance_valid(label):
+				label.text = message
+		)
 
 
 class SignalBinding:
@@ -230,37 +242,3 @@ class SignalBinding:
 		var error := source.connect(callback)
 		if error != OK:
 			push_error("MVC: %s cannot listen to %s." % [who, signal_name])
-
-
-class ErrorBinding:
-	extends RefCounted
-
-	var label: Label
-	var _open := true
-
-
-	func _init(target: Label) -> void:
-		label = target
-
-
-	func from(_value: Variant) -> void:
-		_open = false
-		var target_name := "error"
-		if label != null:
-			target_name = String(label.name) if not String(label.name).is_empty() else label.get_class()
-		var read := Bindings._one_read(target_name)
-		if read.is_empty() or label == null:
-			if label == null:
-				push_error("MVC: error needs a label.")
-			return
-		var owner: Object = read["owner"]
-		var property: StringName = read["property"]
-		PropNotify.listen_error(owner, property, func(message: String) -> void:
-			if is_instance_valid(label):
-				label.text = message
-		)
-
-
-	func _notification(what: int) -> void:
-		if what == NOTIFICATION_PREDELETE and _open:
-			PropNotify.disarm()

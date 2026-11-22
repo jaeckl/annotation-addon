@@ -33,6 +33,7 @@ func test_a_property_is_checked_before_it_is_stored() -> void:
 	assert_true(shop.error_label.text.begins_with("must be at most 9"), shop.error_label.text)
 	assert_eq(shop.hits.size(), 1, "the handler hears the stored failure")
 	assert_eq(String(shop.hits[0]), "gold", "the handler receives the member")
+	assert_eq(shop.attempts[0], 40, "the violation carries the rejected value")
 	assert_engine_error("MvcChecked.gold must be at most")
 	shop.model.gold = 4
 	assert_eq(shop.model.gold, 4, "an accepted assignment is stored")
@@ -65,6 +66,33 @@ func test_a_property_is_checked_before_it_is_stored() -> void:
 	assert_true(shop.hits.has("pace"), "the handler hears the preparation")
 	assert_engine_error("Prepare: @Clamp needs a minimum at or below the maximum.")
 	line.free()
+
+
+func test_an_advisor_rewrites_before_validation_and_can_reject() -> void:
+	var shop := box.resolve(MvcCheck) as MvcCheck
+	await get_tree().process_frame
+	_quiet()
+	assert_engine_error("MvcChecked.gold must be at most")
+	shop.model.gold = 99
+	assert_eq(shop.model.gold, 5, "the advisor rewrites the value before validation")
+	assert_eq(shop.error_label.text, "", "a rewritten value clears the message")
+	assert_eq(shop.hits.size(), 1, "a rewrite does not call the handler")
+	shop.model.gold = -1
+	assert_eq(shop.model.gold, 5, "a rejected advisor keeps the previous value")
+	assert_eq(shop.error_label.text, "gold stays up", "the label shows the advisor message")
+	assert_eq(shop.attempts[shop.attempts.size() - 1], -1, "the violation carries the advisor value")
+	assert_engine_error("MvcChecked.gold gold stays up")
+
+
+func test_a_custom_binder_follows_the_property() -> void:
+	var stash := box.resolve(MvcStash) as MvcStash
+	var label := Label.new()
+	var gauge := MvcGauge.new(label)
+	gauge.from(stash.gold)
+	assert_eq(label.text, "g:0", "the binder starts at the property value")
+	stash.gold = 2
+	assert_eq(label.text, "g:2", "the binder follows the assignment")
+	label.free()
 
 
 func test_a_handler_belongs_on_a_controller() -> void:
