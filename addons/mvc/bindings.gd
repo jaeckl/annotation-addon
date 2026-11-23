@@ -1,8 +1,10 @@
 class_name Bindings
 extends RefCounted
 
-## text, field, property, and error are binders. The next line calls from,
-## because GDScript evaluates arguments before the call. error listens to the
+## text, field, property, and error are binders. A binder listens from the
+## moment it is built, so the property has to be read after that. Three forms
+## do that: from on the next line, link with the binder as the first argument,
+## and from with a lambda that returns the property. error listens to the
 ## message kept when a property is rejected. A custom control extends Binder.
 
 
@@ -20,6 +22,16 @@ static func property(node: Node, path: NodePath) -> ValueBinding:
 
 static func error(label: Label) -> ErrorBinding:
 	return ErrorBinding.new(label)
+
+
+## One line: Bindings.link(Bindings.text(label), model.gold). Arguments are
+## evaluated left to right, so the binder listens before the property is read.
+static func link(binder: Binder, value: Variant) -> void:
+	if binder == null:
+		PropNotify.disarm()
+		push_error("MVC: link needs a binder.")
+		return
+	binder.from(value)
 
 
 static func on(source: Signal) -> SignalBinding:
