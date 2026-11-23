@@ -71,6 +71,12 @@ var _pool_limit: Dictionary = {}
 var _pool_release: Dictionary = {}
 var _pool_moving := false
 var _hooks: Array = []
+var _run_holder: Node
+var _run_node: Node
+var _run_id := 0
+var _run_ending := false
+var _run_destroying := false
+var _injecting: ComponentDefinition
 
 
 func setup(tree: SceneTree) -> void:
@@ -98,6 +104,7 @@ func setup(tree: SceneTree) -> void:
 		tree.node_removed.connect(_on_node_removed)
 	_install_frame()
 	_install_input()
+	_install_runs()
 
 
 ## Drops the scene-tree signals. A container left connected still injects
@@ -107,6 +114,7 @@ func shutdown() -> void:
 		return
 	_exit_open_scenes()
 	_destroy_open()
+	_drop_runs()
 	_drop_signal_links(-1)
 	_pooled.clear()
 	_pool_free.clear()
@@ -221,6 +229,7 @@ func discover() -> void:
 		_scripts[String(entry.get("class", ""))] = script
 	_register_event_publisher()
 	_register_instance_pools()
+	_register_runs()
 	for global_name in _scripts:
 		_scan(_scripts[global_name])
 	_bind_scanned_properties()
@@ -233,7 +242,17 @@ func configuration(script: GDScript) -> Object:
 	return _factories.get(script, null)
 
 
+## A call from gameplay is a lookup at that moment. It is not an injection, so
+## the product being built around it does not count as the holder.
 func resolve(type: GDScript, qualifiers: Array = [], from_node: Node = null) -> Object:
+	var holder := _injecting
+	_injecting = null
+	var found := _resolve_one(type, qualifiers, from_node)
+	_injecting = holder
+	return found
+
+
+func _resolve_one(type: GDScript, qualifiers: Array, from_node: Node) -> Object:
 	if type == null:
 		push_error("IOC: resolve needs a script.")
 		return null
@@ -251,7 +270,12 @@ func _instance_of(definition: ComponentDefinition, from_node: Node = null) -> Ob
 	if definition in _creating:
 		push_error("IOC: cycle while creating %s." % definition.label)
 		return null
-	var scene_id := int(_definition_scene.get(definition, 0))
+	if definition.run:
+		if not _run_admits(definition):
+			return null
+		# A run product never sees the scene that asked for it first.
+		from_node = _run_node
+	var scene_id := _scope_of(definition)
 	if scene_id != 0:
 		var bucket: Dictionary = _scene_instances.get(scene_id, {})
 		var cached: Object = bucket.get(definition, null)
@@ -278,7 +302,7 @@ func _instance_of(definition: ComponentDefinition, from_node: Node = null) -> Ob
 func _resolve_dependency(dependency: Dictionary, from_node: Node) -> Variant:
 	if dependency.get("collection", false):
 		return _resolve_all(dependency["type"], dependency["qualifiers"], from_node)
-	return resolve(dependency["type"], dependency["qualifiers"], from_node)
+	return _resolve_one(dependency["type"], dependency["qualifiers"], from_node)
 
 
 func _resolve_all(type: GDScript, qualifiers: Array, from_node: Node) -> Array:
@@ -320,11 +344,20 @@ func _on_node_added(node: Node) -> void:
 	var fields = _fields(script)
 	if fields == null or fields.is_empty():
 		return
+	# A scene node is filled for itself, even when it enters while a product
+	# is being built.
+	var holder := _injecting
+	_injecting = null
 	_inject_field_list(node, fields, "%s scene" % node.name, node)
+	_injecting = holder
 
 
 func _on_node_removed(node: Node) -> void:
 	var scene_id := node.get_instance_id()
+	if _run_id != 0 and scene_id == _run_id:
+		# Something else freed the run node. The run cannot continue.
+		_forget_run()
+		return
 	if not _open_scenes.has(scene_id):
 		return
 	_exit_scene(scene_id)
@@ -428,6 +461,12 @@ func _newest_definition() -> ComponentDefinition:
 
 
 func publish_event(event: Event, from_node: Node = null, ancestors: Array = []) -> void:
+	_publish(event, from_node, ancestors, false)
+
+
+## every_scene is for the run events. No node publishes those, so each open
+## scene hears them, and a returned Event stays in that scene.
+func _publish(event: Event, from_node: Node, ancestors: Array, every_scene: bool) -> void:
 	if event == null:
 		push_error("IOC: publish needs an Event.")
 		return
@@ -442,7 +481,15 @@ func publish_event(event: Event, from_node: Node = null, ancestors: Array = []) 
 	var chain := ancestors.duplicate()
 	chain.append(event_script)
 	_deliver(_app_listeners, event, event_script, from_node, chain)
-	if from_node != null and is_instance_valid(from_node):
+	if _run_id != 0:
+		_deliver(_scene_listeners.get(_run_id, []), event, event_script, from_node, chain)
+	if every_scene:
+		for scene_id in _open_scenes.keys():
+			var open_root := _open_scenes.get(scene_id) as Node
+			if open_root == null or not is_instance_valid(open_root):
+				continue
+			_deliver(_scene_listeners.get(scene_id, []), event, event_script, open_root, chain)
+	elif from_node != null and is_instance_valid(from_node):
 		var root := _scene_root_of(from_node)
 		if root != null:
 			_deliver(_scene_listeners.get(root.get_instance_id(), []), event, event_script, from_node, chain)
@@ -513,7 +560,7 @@ func _resume_listener(value: Variant, job: Dictionary, record: Dictionary, from_
 	_async_jobs.erase(job)
 	_release_async(job.get("script"))
 	var scene_id := int(job.get("scene_id", 0))
-	if scene_id != 0 and not _open_scenes.has(scene_id):
+	if scene_id != 0 and scene_id != _run_id and not _open_scenes.has(scene_id):
 		return
 	var from_node: Node = null
 	if from_id != 0 and is_instance_id_valid(from_id):
@@ -555,6 +602,194 @@ func _register_event_publisher() -> void:
 	publisher.container = self
 	_add_definition(script, [], "EventPublisher", script, null, &"", [], [])
 	_remember(_newest_definition(), publisher)
+
+
+func _register_runs() -> void:
+	var script := _scripts.get("Runs") as GDScript
+	if script == null:
+		push_error("IOC: Runs is missing.")
+		return
+	var runs := Runs.new()
+	runs.container = self
+	_add_definition(script, [], "Runs", script, null, &"", [], [])
+	_remember(_newest_definition(), runs)
+
+
+func _install_runs() -> void:
+	if _tree == null or _tree.root == null or _run_holder != null:
+		return
+	# The root refuses a direct add while the first scene is still entering.
+	# This node is added once, so a run can open and end under it at any time.
+	_run_holder = Node.new()
+	_run_holder.name = "IocRuns"
+	if _tree.root.is_inside_tree():
+		_tree.root.add_child(_run_holder)
+	else:
+		_tree.root.add_child.call_deferred(_run_holder)
+
+
+func _drop_runs() -> void:
+	if _run_holder != null and is_instance_valid(_run_holder):
+		if _run_holder.get_parent() != null:
+			_run_holder.get_parent().remove_child(_run_holder)
+		_run_holder.free()
+	_run_holder = null
+
+
+func is_run_open() -> bool:
+	return _run_id != 0
+
+
+## Opens the run. A @RunScope product is built on its first resolve after this.
+func start_run() -> bool:
+	if _tree == null or _run_holder == null or not is_instance_valid(_run_holder):
+		push_error("IOC: start needs a scene tree.")
+		return false
+	if _run_ending or _run_destroying:
+		push_error("IOC: a run is ending.")
+		return false
+	if _run_id != 0:
+		push_error("IOC: a run is already open. Use restart.")
+		return false
+	_run_node = Node.new()
+	_run_node.name = "IocRun"
+	_run_id = _run_node.get_instance_id()
+	_scene_instances[_run_id] = {}
+	_run_holder.add_child(_run_node)
+	_publish(RunStarted.new(), null, [], true)
+	return true
+
+
+## Publishes RunEnding, runs @OnDestroy in reverse publish order, and frees
+## the run node with every Node product under it.
+func end_run() -> bool:
+	if _run_id == 0:
+		push_error("IOC: no run is open.")
+		return false
+	if _run_ending or _run_destroying:
+		push_error("IOC: the run is already ending.")
+		return false
+	for definition in _creating:
+		if (definition as ComponentDefinition).run:
+			push_error("IOC: %s is being built. The run cannot end now." % (definition as ComponentDefinition).label)
+			return false
+	var ending := _run_id
+	_run_ending = true
+	_publish(RunEnding.new(), null, [], true)
+	_run_ending = false
+	if _run_id != ending:
+		return true
+	_drop_run()
+	return true
+
+
+## Reads a run product at call time. An app product uses this because it
+## cannot inject one.
+func resolve_run(type: GDScript, qualifiers: Array = []) -> Object:
+	if type == null:
+		push_error("IOC: resolve needs a script.")
+		return null
+	var candidates: Array = []
+	for definition in definitions:
+		if (definition as ComponentDefinition).run:
+			candidates.append(definition)
+	var found: Array = selector.select(candidates, type, qualifiers)
+	if found.is_empty():
+		push_error("IOC: no run product for %s [%s]." % [_script_name(type), _describe_qualifiers(qualifiers)])
+		return null
+	if found.size() != 1:
+		_report_selection(type, qualifiers, found)
+		return null
+	var holder := _injecting
+	_injecting = null
+	var instance := _instance_of(found[0])
+	_injecting = holder
+	return instance
+
+
+func _run_admits(definition: ComponentDefinition) -> bool:
+	if _run_id == 0:
+		push_error("IOC: %s is run scoped and no run is open." % definition.label)
+		return false
+	if _injecting != null and not _may_hold_run(_injecting):
+		push_error("IOC: %s outlives the run and cannot hold %s. Ask Runs.resolve when it is needed." % [_injecting.label, definition.label])
+		return false
+	var built: Dictionary = _scene_instances.get(_run_id, {})
+	if _run_destroying and not built.has(definition):
+		push_error("IOC: the run is ending. %s is not built." % definition.label)
+		return false
+	return true
+
+
+## An app product outlives every run, so it may not hold a run product. A
+## scene product and a pooled instance are rebuilt with their scene.
+func _may_hold_run(definition: ComponentDefinition) -> bool:
+	if definition.run or _definition_scene.has(definition):
+		return true
+	return _pooled.get(definition.type) == definition
+
+
+func _scope_of(definition: ComponentDefinition) -> int:
+	if definition.run:
+		return _run_id
+	return int(_definition_scene.get(definition, 0))
+
+
+func _scope_root(scope_id: int) -> Node:
+	if scope_id != 0 and scope_id == _run_id:
+		return _run_node
+	return _open_scenes.get(scope_id) as Node
+
+
+## Closes the books on the open run. The run node is left to the caller. A
+## Node product that is still waiting for its deferred add has no parent to
+## free it, so it is freed here.
+func _forget_run(at_once: bool = false) -> void:
+	if _run_id == 0:
+		return
+	var run_id := _run_id
+	_run_destroying = true
+	_destroy_scene(run_id)
+	_run_destroying = false
+	var built: Dictionary = _scene_instances.get(run_id, {})
+	for instance in built.values():
+		if not (instance is Node) or not is_instance_valid(instance):
+			continue
+		var node := instance as Node
+		if node.get_parent() != null:
+			continue
+		if at_once:
+			node.free()
+		else:
+			node.queue_free()
+	_scene_instances.erase(run_id)
+	_scene_listeners.erase(run_id)
+	_scene_process.erase(run_id)
+	_scene_physics.erase(run_id)
+	_scene_schedules.erase(run_id)
+	_scene_physics_schedules.erase(run_id)
+	_scene_input.erase(run_id)
+	_scene_actions.erase(run_id)
+	_drop_signal_links(run_id)
+	_cancel_scene_async(run_id)
+	_drop_scene_hooks(run_id)
+	_run_id = 0
+	_run_node = null
+
+
+## A run that gameplay ends may be ended by one of its own nodes, so the node
+## is freed after the frame. Shutdown frees it at once.
+func _drop_run(at_once: bool = false) -> void:
+	var node := _run_node
+	_forget_run(at_once)
+	if node == null or not is_instance_valid(node):
+		return
+	if node.get_parent() != null:
+		node.get_parent().remove_child(node)
+	if at_once:
+		node.free()
+	else:
+		node.queue_free()
 
 
 func _register_instance_pools() -> void:
@@ -765,7 +1000,7 @@ func _pooled_name(instance: Object) -> String:
 
 
 func _remember(definition: ComponentDefinition, instance: Object) -> void:
-	var scene_id := int(_definition_scene.get(definition, 0))
+	var scene_id := _scope_of(definition)
 	var live := instance.get_script() as GDScript
 	var report := not _same_product_script(live, definition.type)
 	_store_listeners(instance, scene_id, report)
@@ -790,7 +1025,7 @@ func _remember(definition: ComponentDefinition, instance: Object) -> void:
 func _attach_scene(scene_id: int, instance: Object) -> void:
 	if not (instance is Node):
 		return
-	var root := _open_scenes.get(scene_id) as Node
+	var root := _scope_root(scene_id)
 	if root == null or not is_instance_valid(root):
 		return
 	var node := instance as Node
@@ -926,12 +1161,23 @@ func run_scheduled_physics() -> void:
 	_run_schedules(_app_physics_schedules, _scene_physics_schedules, 0.0)
 
 
-func _run_ticks(app: Array, scenes: Dictionary, delta: float) -> void:
+## The order every frame list uses: app products, then the open run, then
+## each open scene.
+func _scoped_calls(app: Array, scenes: Dictionary) -> Array:
 	var calls: Array = app.duplicate()
+	if _run_id != 0:
+		var run_bucket: Array = scenes.get(_run_id, [])
+		calls.append_array(run_bucket)
 	for scene_id in scenes.keys():
+		if int(scene_id) == _run_id:
+			continue
 		var bucket: Array = scenes.get(scene_id, [])
-		calls.append_array(bucket.duplicate())
-	for record in calls:
+		calls.append_array(bucket)
+	return calls
+
+
+func _run_ticks(app: Array, scenes: Dictionary, delta: float) -> void:
+	for record in _scoped_calls(app, scenes):
 		_call_tick(record, delta)
 
 
@@ -947,13 +1193,9 @@ func _call_tick(record: Dictionary, delta: float) -> void:
 
 
 func _run_schedules(app: Array, scenes: Dictionary, delta: float) -> void:
-	var calls: Array = app.duplicate()
-	for scene_id in scenes.keys():
-		var bucket: Array = scenes.get(scene_id, [])
-		calls.append_array(bucket.duplicate())
 	var now := Time.get_datetime_dict_from_system()
 	var stamp := _schedule_stamp(now)
-	for record in calls:
+	for record in _scoped_calls(app, scenes):
 		if _schedule_due(record, delta, now, stamp):
 			_call_schedule(record)
 
@@ -1165,7 +1407,10 @@ func _destroy_open() -> void:
 	_destroying = true
 	var scene_ids: Array = _scene_destroy.keys()
 	for index in range(scene_ids.size() - 1, -1, -1):
+		if int(scene_ids[index]) == _run_id:
+			continue
 		_destroy_scene(int(scene_ids[index]))
+	_drop_run(true)
 	var pending: Array = _app_destroy.duplicate()
 	_app_destroy.clear()
 	_destroy_records(pending)
@@ -1303,7 +1548,7 @@ func _arm_scene_hooks(instance: Object, scene_id: int, _report: bool) -> void:
 	var script := instance.get_script() as GDScript
 	if script == null:
 		return
-	if scene_id != 0:
+	if scene_id != 0 and scene_id != _run_id:
 		_reject_scene_product_hooks(script)
 		return
 	var fresh: Array = []
@@ -1313,6 +1558,7 @@ func _arm_scene_hooks(instance: Object, scene_id: int, _report: bool) -> void:
 			"method": item.get("method"),
 			"script": item.get("script"),
 			"type_name": item.get("type_name"),
+			"scope": scene_id,
 		}
 		if String(item.get("kind", "")) == "enter":
 			_app_scene_enter.append(record)
@@ -1325,6 +1571,13 @@ func _arm_scene_hooks(instance: Object, scene_id: int, _report: bool) -> void:
 		if root == null or not is_instance_valid(root):
 			continue
 		_call_scene_records(fresh, root)
+
+
+## A run product visits scenes like an app product does. Its records leave
+## the shared lists when the run ends.
+func _drop_scene_hooks(scope_id: int) -> void:
+	_app_scene_enter = _app_scene_enter.filter(func(record: Dictionary) -> bool: return int(record.get("scope", 0)) != scope_id)
+	_app_scene_exit = _app_scene_exit.filter(func(record: Dictionary) -> bool: return int(record.get("scope", 0)) != scope_id)
 
 
 func _exit_open_scenes() -> void:
@@ -1676,11 +1929,7 @@ func _drop_input() -> void:
 func run_unhandled_input(event: InputEvent) -> bool:
 	if event == null:
 		return false
-	var calls: Array = _app_input.duplicate()
-	for scene_id in _scene_input.keys():
-		var bucket: Array = _scene_input.get(scene_id, [])
-		calls.append_array(bucket.duplicate())
-	for record in calls:
+	for record in _scoped_calls(_app_input, _scene_input):
 		if not _input_matches(event, record):
 			continue
 		if _call_input(record, event):
@@ -1865,11 +2114,7 @@ func _reject_configuration_input_mark(annotation: Object, target: Object, bucket
 ## start of _process, before the @Process methods. A direct call uses the
 ## same lists. The value is the held state, including zero.
 func run_input_actions() -> void:
-	var calls: Array = _app_actions.duplicate()
-	for scene_id in _scene_actions.keys():
-		var bucket: Array = _scene_actions.get(scene_id, [])
-		calls.append_array(bucket.duplicate())
-	for record in calls:
+	for record in _scoped_calls(_app_actions, _scene_actions):
 		_call_action(record)
 
 
@@ -2390,16 +2635,26 @@ func _scan(script: GDScript) -> void:
 	_reject_misplaced_pooled(script)
 	_reject_misplaced_release(script)
 	_reject_misplaced_scene(script)
+	_reject_misplaced_run(script)
+	var run := AnnotationUtils.has_annotation(script, RunScope)
 	if AnnotationUtils.has_annotation(script, Configuration):
 		if AnnotationUtils.has_annotation(script, Pooled):
 			push_error("IOC: %s is @Pooled on a configuration." % _script_name(script))
 		if AnnotationUtils.has_annotation(script, Scene):
 			push_error("IOC: %s is @Scene on a configuration." % _script_name(script))
+		if run:
+			push_error("IOC: %s is @RunScope on a configuration. Mark the factory method." % _script_name(script))
 		_register_configuration(script)
 		return
 	if AnnotationUtils.has_annotation(script, Component):
 		if AnnotationUtils.has_annotation(script, Pooled):
+			if run:
+				push_error("IOC: %s is @RunScope and @Pooled. A product has one scope." % _script_name(script))
+				return
 			_register_pooled(script)
+			return
+		if run and AnnotationUtils.has_annotation(script, Aspect):
+			push_error("IOC: %s is @RunScope and @Aspect. Advice is app scoped." % _script_name(script))
 			return
 		_register_class_product(script)
 		return
@@ -2407,6 +2662,8 @@ func _scan(script: GDScript) -> void:
 		push_error("IOC: %s is @Pooled without @Component." % _script_name(script))
 	if AnnotationUtils.has_annotation(script, Scene):
 		push_error("IOC: %s is @Scene without @Component." % _script_name(script))
+	if run:
+		push_error("IOC: %s is @RunScope without @Component." % _script_name(script))
 	_reject_orphan_methods(script)
 	_reject_loose_signals(script)
 
@@ -2423,6 +2680,22 @@ func _known_product(product: ComponentDefinition, node: Node) -> bool:
 		if bucket.get(product) == node:
 			return true
 	return false
+
+
+func _reject_misplaced_run(script: GDScript) -> void:
+	AnnotationUtils.for_each_annotation_initialized(RunScope, script, _take_run_mark.bind(script))
+
+
+func _take_run_mark(_annotation: Object, target: Object, script: GDScript) -> void:
+	if target is ScriptInfo:
+		return
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		if AnnotationUtils.has_annotation(script, Configuration) and AnnotationUtils.has_annotation(script, Component, info.name):
+			return
+		push_error("IOC: %s.%s is @RunScope and is not a factory method." % [_script_name(script), info.name])
+		return
+	push_error("IOC: @RunScope on %s belongs on a class or a factory method." % _script_name(script))
 
 
 func _reject_misplaced_scene(script: GDScript) -> void:
@@ -2713,6 +2986,9 @@ func _take_configuration_component(annotation: Object, target: Object, bucket: D
 			push_error("IOC: %s.%s is static. Factory methods are called on the configuration instance." % [_script_name(script), info.name])
 			return
 		var decision := _gate(script, "func", info.name)
+		if decision == "scene" and AnnotationUtils.has_annotation(script, RunScope, info.name):
+			push_error("IOC: %s.%s is @RunScope and waits for a scene. A product has one scope." % [_script_name(script), info.name])
+			return
 		if _postpone(decision, {"kind": "method", "script": script, "factory": bucket["factory"], "method": info.name}):
 			return
 		_register_method(script, bucket["factory"], info.name)
@@ -2724,6 +3000,10 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 	var return_script := _method_return_script(script, method)
 	if return_script == null:
 		push_error("IOC: %s.%s needs a GDScript return type." % [_script_name(script), method])
+		return
+	var run := AnnotationUtils.has_annotation(script, RunScope, method)
+	if run and _applying_scene:
+		push_error("IOC: %s.%s is @RunScope and its configuration waits for a scene. A product has one scope." % [_script_name(script), method])
 		return
 	var parameters := _parameters(script, method)
 	if parameters == null:
@@ -2740,10 +3020,15 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 	_collect_actions(return_script, true)
 	_collect_signals(return_script, true)
 	_add_definition(return_script, _qualifiers(script, "func", method, &""), "%s.%s" % [_script_name(script), method], script, factory, method, parameters, fields)
+	_newest_definition().run = run
 
 
 func _register_class_product(script: GDScript) -> void:
 	var decision := _gate(script, "script")
+	var run := AnnotationUtils.has_annotation(script, RunScope)
+	if run and decision == "scene":
+		push_error("IOC: %s is @RunScope and waits for a scene. A product has one scope." % _script_name(script))
+		return
 	if _postpone(decision, {"kind": "class", "script": script}):
 		return
 	var parameters := _parameters(script, &"_init")
@@ -2769,6 +3054,7 @@ func _register_class_product(script: GDScript) -> void:
 	_collect_actions(script, true)
 	_collect_signals(script, true)
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
+	_newest_definition().run = run
 	if packed is PackedScene:
 		_newest_definition().packed = packed
 	_record_advice(script)
@@ -3022,6 +3308,14 @@ func _is_qualifier_target(target: Object, kind: String, member: StringName, para
 
 
 func _construct(definition: ComponentDefinition, from_node: Node) -> Object:
+	var holder := _injecting
+	_injecting = definition
+	var instance := _build(definition, from_node)
+	_injecting = holder
+	return instance
+
+
+func _build(definition: ComponentDefinition, from_node: Node) -> Object:
 	var args: Array = []
 	for parameter in definition.parameters:
 		var value: Variant = _resolve_dependency(parameter, from_node)
@@ -3044,7 +3338,11 @@ func _construct(definition: ComponentDefinition, from_node: Node) -> Object:
 
 
 func _inject_fields(instance: Object, definition: ComponentDefinition, from_node: Node) -> bool:
-	return _inject_field_list(instance, definition.fields, definition.label, from_node)
+	var holder := _injecting
+	_injecting = definition
+	var filled := _inject_field_list(instance, definition.fields, definition.label, from_node)
+	_injecting = holder
+	return filled
 
 
 func _inject_field_list(instance: Object, fields: Array, label: String, from_node: Node) -> bool:
@@ -3093,6 +3391,9 @@ func _report_selection(type: GDScript, qualifiers: Array, found: Array) -> void:
 	var requested := _script_name(type)
 	var needed := _describe_qualifiers(qualifiers)
 	if found.is_empty():
+		if _injecting != null and _injecting.run and _a_scene_has(type, qualifiers):
+			push_error("IOC: %s is run scoped and cannot hold scene product %s." % [_injecting.label, requested])
+			return
 		push_error("IOC: no component for %s [%s]." % [requested, needed])
 		return
 	var labels: PackedStringArray = PackedStringArray()
@@ -3100,6 +3401,14 @@ func _report_selection(type: GDScript, qualifiers: Array, found: Array) -> void:
 		var product := definition as ComponentDefinition
 		labels.append("%s [%s]" % [product.label, _describe_qualifiers(product.qualifiers)])
 	push_error("IOC: several components for %s [%s]: %s." % [requested, needed, ", ".join(labels)])
+
+
+func _a_scene_has(type: GDScript, qualifiers: Array) -> bool:
+	for scene_id in _scene_definitions.keys():
+		var bucket: Array = _scene_definitions.get(scene_id, [])
+		if not selector.select(bucket, type, qualifiers).is_empty():
+			return true
+	return false
 
 
 func _describe_qualifiers(qualifiers: Array) -> String:
@@ -3117,6 +3426,9 @@ func _resolve_hooks() -> void:
 	if hook_script == null:
 		return
 	for definition in selector.select(definitions, hook_script, []):
+		if (definition as ComponentDefinition).run:
+			push_error("IOC: %s is a ContainerHook and cannot be @RunScope." % (definition as ComponentDefinition).label)
+			continue
 		var instance := _instance_of(definition)
 		if instance is ContainerHook:
 			_hooks.append(instance)
@@ -3224,7 +3536,7 @@ func _construct_woven(definition: ComponentDefinition, args: Array, from_node: N
 	var origin := definition.owner_script
 	var chains: Dictionary = {}
 	if origin != null and not AnnotationUtils.has_annotation(origin, Aspect):
-		var advice_from: Node = from_node if int(_definition_scene.get(definition, 0)) != 0 else null
+		var advice_from: Node = from_node if _scope_of(definition) != 0 else null
 		var bound: Variant = _bind_advice(origin, advice_from)
 		if bound == null:
 			return null

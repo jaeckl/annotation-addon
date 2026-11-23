@@ -12,3 +12,5 @@ var method: StringName = &""
 var parameters: Array = []
 var fields: Array = []
 var packed: PackedScene
+## True for a @RunScope product. The instance lives in the open run.
+var run := false

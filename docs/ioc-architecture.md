@@ -29,9 +29,10 @@ Factory-method parameters and `_init` parameters are resolved before the call. `
 
 Conditions and profiles are their own annotations. The factory reads every annotation on the class or the method before it registers a definition. `@Profile` means a run mode (client, dedicated server, editor, or a project feature tag). `@ConditionalOn*` means a yes-or-no check against a setting, a registered type, or a node present in the active scope. Those annotations are not folded into `@Component`.
 
-Two scopes:
+Three scopes:
 
 - **App.** One instance for the process. A `Node` is parented to the scene-tree root. A `RefCounted` is held by the container.
+- **Run.** One instance per playthrough. `@RunScope` marks the product, and `Runs` opens and ends the run. It outlives a scene change and is dropped on a new game. A `Node` is parented under the run node. The run scope section below has the rules.
 - **Scene.** One instance per sub-scene root, keyed by that root's instance id. Not one instance per `PackedScene` resource. The root is the nearest node, including the caller itself, whose `scene_file_path` is not empty. That is the root of the instanced sub-scene. A node written directly in the running scene uses the running scene's root, which has a `scene_file_path` too. A node with no such ancestor has no scene scope, and a scene-scoped resolve from it fails.
 
 The scene tree owns one container. The tree owns node lifetime. The container is the lookup index. It holds `RefCounted` instances itself. It does not parent nodes, and it does not keep a second owning reference to a node.
@@ -336,12 +337,61 @@ stateDiagram-v2
 
 `close_scene` calls `release` on every installed `ScopeHandler`. `SceneScope` drops that root's map. A user handler releases whatever key it stored for that root. Node products under the root are freed by the tree. The container does not free them again. `RefCounted` products for that scene are released with the map.
 
+## Run scope
+
+A run is one playthrough. It opens on a new game and ends on game over or on the way back to the menu. A run product keeps its state across scene changes and loses it when the run ends, so the next run starts from defaults.
+
+```mermaid
+flowchart TB
+    app["App: the process<br/>settings, EventPublisher, Runs"]
+    run["Run: one playthrough<br/>@RunScope products"]
+    scene["Scene: one sub-scene root<br/>scene products, pooled instances, scene nodes"]
+    scene -->|may inject| run
+    scene -->|may inject| app
+    run -->|may inject| app
+```
+
+An arrow is an allowed injection. A longer-lived product does not hold a shorter-lived one. An app product reads the run at call time with `Runs.resolve`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoRun
+    NoRun --> Open: Runs.start, then RunStarted
+    Open --> Open: first resolve builds a product
+    Open --> Ending: Runs.end, then RunEnding
+    Ending --> NoRun: @OnDestroy in reverse, run node freed
+    Open --> NoRun: shutdown, no event
+```
+
+`Runs.restart` is `end` followed by `start`. When no run is open it only starts one.
+
+```mermaid
+sequenceDiagram
+    participant Game as Gameplay
+    participant Runs
+    participant Box as IOCContainer
+    participant Product as Run product
+    participant Node as IocRun
+
+    Game->>Runs: start()
+    Runs->>Box: start_run()
+    Box->>Node: new node under IocRuns
+    Box-->>Game: RunStarted to app, run, and open scenes
+    Game->>Box: resolve(Wallet) from a scene node
+    Box->>Product: new(), fill @Inject from the run node
+    Box->>Product: @Ready
+    Game->>Runs: end()
+    Box-->>Game: RunEnding, products still there
+    Box->>Product: @OnDestroy, reverse publish order
+    Box->>Node: remove from the tree, free after the frame
+```
+
 ## What the container stores
 
-| Kind | App | Scene |
-| --- | --- | --- |
-| Node | Child of the tree root. Container stores the lookup. | Child of the scene root. Container stores the lookup. |
-| RefCounted | Held in the app map. | Held in the scene map until the root exits. |
+| Kind | App | Run | Scene |
+| --- | --- | --- | --- |
+| Node | Child of the tree root. Container stores the lookup. | Child of `IocRun`. Freed with that node when the run ends. | Child of the scene root. Container stores the lookup. |
+| RefCounted | Held in the app map. | Held in the run map until the run ends. | Held in the scene map until the root exits. |
 
 ## First slice
 
@@ -444,6 +494,8 @@ Saving is a separate library. `addons/serialize` maps `@Serialize` and `@Transie
 
 `@Pooled` marks a `@Component` with many instances. `resolve` on that class is `push_error`. `InstancePools` is an app product the container registers. `borrow(type, parent)` returns a parked instance for that parent's scene, or builds one and fills `@Inject` once. A class with `@Scene` is instantiated from that packed scene. A class without it is built with `new()`. The caller writes the per-shot fields. `_ready` runs on the first entry. `release` calls every `@OnRelease` method, then parks a node under `IocPool` on the scene root, hides a `CanvasItem`, and sets process mode to disabled. A `RefCounted` waits in a list. `@OnRelease` takes nothing, and a method that awaits is `push_error`. The first argument of `@Pooled` is the most instances one scene may hold, and `0` is no cap. A borrow past that cap is `push_error` and returns null. The scene root taking those instances away drops them, and `queue_free` drops the id. `@Pooled` without `@Component`, on a method, or on a `@Configuration` is `push_error`. `@OnRelease` on a class that is not pooled, or on anything other than a method, is `push_error`. A pooled script already sitting in a scene is `push_error`. A pooled class that waits for a scene condition is `push_error`. A negative limit is `push_error`.
 
+`@RunScope` marks a `@Component` class or a factory method whose product lives for one run. `Runs` is an app product the container registers. `start` opens a run, `end` closes it, and `restart` does both, or only starts when none is open. One run is open at a time. A second `start` and an `end` without a run are `push_error` and return false. A run product is built on its first resolve inside the open run and is kept until that run ends. Nothing builds it earlier, so a run product that only ticks or listens needs one resolve, for example from a `RunStarted` listener. A resolve while no run is open is `push_error` and returns null. The definition sits in the app list, so every type match and every condition sees it. A scene product, a pooled instance, and a scene node may inject a run product. An app product may not, because it outlives the run. That injection is `push_error`, and the app product is not built. An app product asks `Runs.resolve(type)` when it needs the value, and that call only returns run products. A run product may inject app products and other run products. It is built from the run node, so it does not see the scene that asked first, and a scene product on its field is `push_error`. A typed array follows the same rule for each member. `RunStarted` is published after the run opens and `RunEnding` before it closes. App listeners, run listeners, and the listeners of every open scene hear both. A run product that an app listener of `RunStarted` builds hears that same event. While `RunEnding` is published the run products are still there. Then `@OnDestroy` runs in the reverse of the publish order, the run's listeners, ticks, schedules, input, actions, signals, and scene visits leave, and the run node is removed from the tree and freed after the frame. A scene product keeps the run product it was built with, so a retry is `restart` and a scene reload. `end` from a `RunEnding` listener, and `end` while a run product is being built, are `push_error`. A run product first asked for during `@OnDestroy` is `push_error` and is not built. `@Ready`, `@OnDestroy`, `@Process`, `@PhysicsProcess`, `@Scheduled`, `@EventListener`, `@UnhandledInput`, `@InputAction`, `@OnSceneEnter`, and `@OnSceneExit` work as on an app product. Every frame list runs app products first, then the run, then each open scene, and an event reaches listeners in that same order. A `Node` product is parented under `IocRun`, which sits under `IocRuns` on the tree root. `IocRuns` is added once at setup, because the root refuses a direct add while the first scene is entering. Freeing `IocRun` from outside closes the run and still runs `@OnDestroy`. Shutdown destroys scene products, then run products, then app products, and does not publish `RunEnding`. `@RunScope` on a `@Configuration` class, with `@Pooled`, with `@Aspect`, with a node condition, on a `ContainerHook`, without `@Component`, on a method that is not a factory method, or on a field is `push_error`.
+
 `@Aspect` marks a `@Component` whose methods advise other component methods. `@Before`, `@After`, and `@Around` each name one annotation class. A target method that carries that annotation is advised. The container builds one `GDScript` subclass of the component, overrides those methods, and calls `super`. `definition.type` and the qualifiers stay on the original script. `resolve` still returns that type. `@Before` runs, then `@Around`, then the method, then `@After`. Within one kind the methods run in source order. `@Around` receives a `ProceedingJoinPoint` and calls `proceed` to continue. An argument array replaces the arguments. Skipping `proceed` skips the method. `@After` still runs, and `join.result` is the value the chain returned. Advice is synchronous. An advice method that awaits is `push_error`. The container does not weave an `@Aspect` class, a factory product, a settings object, `_init`, a static method, or a node the scene already created. A GDScript call on the instance, including a call the method makes to itself, hits the override. An explicit `super` call does not. The proxy script is the instance script, so `get_script()` is not the original class. `is` the original class still holds, and a scene node the container created is still recognized as that product.
 
 ## Out of this plan
@@ -454,3 +506,6 @@ Parked from the game side, not designed yet. Physics, tweens, navigation, and th
 
 - A pause marker that sets a node's process mode when the container parents it.
 - A serialize field advisor, the same shape as `PropertyAdvisor`, on the way into a document and back out. The codec stays a byte format.
+- Saving a run. `@Persist` on a run product and a `SaveSlots` product, in a starter that depends on this addon and on `addons/serialize`. Loading ends the run, opens a new one, and fills each saved product after inject and before `@Ready`.
+- A run product that is built when the run opens, without a first resolve.
+- An app product that is first resolved from a scene node can still inject that scene's product and keep it after the scene leaves. The run scope refuses the same shape. The scene scope does not yet.
