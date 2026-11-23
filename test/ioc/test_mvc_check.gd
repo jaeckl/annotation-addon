@@ -82,6 +82,17 @@ func test_an_advisor_rewrites_before_validation_and_can_reject() -> void:
 	assert_eq(shop.error_label.text, "gold stays up", "the label shows the advisor message")
 	assert_eq(shop.attempts[shop.attempts.size() - 1], -1, "the violation carries the advisor value")
 	assert_engine_error("MvcChecked.gold gold stays up")
+	var linked := Label.new()
+	Bindings.link(Bindings.error(linked), shop.model.gold)
+	assert_eq(linked.text, "gold stays up", "a linked error label shows the stored message")
+	var lazy := Label.new()
+	Bindings.error(lazy).from(func() -> int: return shop.model.gold)
+	assert_eq(lazy.text, "gold stays up", "a lambda error label shows the stored message")
+	shop.model.gold = 2
+	assert_eq(linked.text, "", "an accepted assignment clears the linked label")
+	assert_eq(lazy.text, "", "an accepted assignment clears the lambda label")
+	linked.free()
+	lazy.free()
 
 
 func test_a_custom_binder_follows_the_property() -> void:

@@ -79,6 +79,56 @@ func test_a_binding_reads_one_property() -> void:
 	label.free()
 
 
+func test_a_binding_fits_on_one_line() -> void:
+	var stash := box.resolve(MvcStash) as MvcStash
+	var label := Label.new()
+	Bindings.link(Bindings.text(label), stash.gold)
+	assert_eq(label.text, "0", "link starts at the property value")
+	stash.gold = 3
+	assert_eq(label.text, "3", "link follows the property")
+	var line := LineEdit.new()
+	Bindings.link(Bindings.field(line), stash.title)
+	assert_eq(line.text, "shop", "a linked line starts at the property value")
+	line.text = "hall"
+	line.text_changed.emit(line.text)
+	assert_eq(stash.title, "hall", "a linked line writes the property")
+	var lazy := Label.new()
+	Bindings.text(lazy).from(func() -> int: return stash.gold)
+	assert_eq(lazy.text, "3", "a lambda starts at the property value")
+	stash.gold = 5
+	assert_eq(lazy.text, "5", "a lambda follows the property")
+	assert_eq(label.text, "5", "the linked label still follows")
+	var bar := ProgressBar.new()
+	Bindings.property(bar, ^":value").from(func() -> int: return stash.gold)
+	assert_eq(bar.value, 5.0, "a lambda binds a property path")
+	var typed := LineEdit.new()
+	Bindings.field(typed).from(func() -> int: return stash.bonus)
+	typed.text = "7"
+	typed.text_changed.emit(typed.text)
+	assert_eq(stash.bonus, 7, "a lambda line writes the property")
+	var both := Label.new()
+	Bindings.link(Bindings.text(both), stash.gold + stash.bonus)
+	assert_engine_error("Label binds one property.")
+	var none := Label.new()
+	Bindings.text(none).from(func() -> int: return 7)
+	assert_engine_error("Label binds a property.")
+	var early := Label.new()
+	Bindings.text(early).from(stash.gold)
+	assert_engine_error("Label binds a property.")
+	stash.gold = 6
+	assert_eq(early.text, "", "a chained read is too early to bind")
+	Bindings.link(null, stash.gold)
+	assert_engine_error("link needs a binder.")
+	label.free()
+	line.free()
+	lazy.free()
+	bar.free()
+	typed.free()
+	both.free()
+	none.free()
+	early.free()
+
+
 func test_a_view_starts_hidden() -> void:
 	var view := box.resolve(MvcShopView) as MvcShopView
 	await get_tree().process_frame
