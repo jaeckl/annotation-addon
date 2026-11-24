@@ -15,4 +15,8 @@ func _initialize() -> void:
 
 
 func _finalize() -> void:
+	# The tree is still whole here. Scene, run, and app products are destroyed
+	# in that order before the root is freed.
+	if container != null:
+		container.shutdown()
 	container = null
