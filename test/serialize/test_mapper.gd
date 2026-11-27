@@ -197,3 +197,27 @@ func test_a_field_named_type_is_rejected() -> void:
 	var mapper := _mapper()
 	assert_eq(mapper.write(SaveTypeField.new()).size(), 0, "write returns no bytes")
 	assert_engine_error("SaveTypeField._type cannot be a field.")
+
+
+func test_read_into_fills_an_existing_instance() -> void:
+	var mapper := _mapper()
+	var bytes := mapper.write(SaveHero.sample())
+	var target := SaveHero.new()
+	target.secret = "keep"
+	assert_true(mapper.read_into(target, bytes), "read_into succeeds")
+	assert_eq(target.hp, 7, "hp filled")
+	assert_eq(target.name_label, "Bea", "renamed field filled")
+	assert_eq(target.secret, "keep", "transient left alone")
+
+
+func test_readable_accepts_a_matching_document() -> void:
+	var mapper := _mapper()
+	var bytes := mapper.write(SavePlayer.new())
+	assert_true(mapper.readable(SavePlayer, bytes), "matching bytes are readable")
+
+
+func test_readable_rejects_a_bad_document() -> void:
+	var mapper := _mapper()
+	var bytes := JSON.stringify({"_type": "SavePlayer", "nope": 1}).to_utf8_buffer()
+	assert_false(mapper.readable(SavePlayer, bytes), "unknown field is not readable")
+	assert_push_error("SavePlayer has no field nope.")
