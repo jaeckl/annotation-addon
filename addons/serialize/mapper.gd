@@ -4,8 +4,11 @@ extends RefCounted
 ## Builds a document from @Serialize / @Transient and asks the codec for bytes.
 ## Vector2, Vector3, Color, NodePath, and StringName are leaves. A cycle is a
 ## push_error and write returns no bytes. A shared reference is written twice.
+## make_instance may supply nested objects (for example a pooled borrow).
 
 var codec: Codec
+## Optional Callable(script: GDScript) -> Object. Return null to use script.new().
+var make_instance: Callable
 var _failed := false
 var _plans: Dictionary = {}
 var _plan_bad: Dictionary = {}
@@ -39,11 +42,8 @@ func read(expected: GDScript, bytes: PackedByteArray) -> Object:
 	if expected == null:
 		_error("Serialize: read needs a class.")
 		return null
-	var document: Variant = codec.read(bytes)
-	if typeof(document) != TYPE_DICTIONARY or not (document as Dictionary).has("_type"):
-		if typeof(document) != TYPE_DICTIONARY or (document as Dictionary).is_empty():
-			return null
-		_error("Serialize: the bytes are not a document.")
+	var document := _document(bytes)
+	if document.is_empty():
 		return null
 	var instance := _read_object(document)
 	if _failed or instance == null:
@@ -53,6 +53,52 @@ func read(expected: GDScript, bytes: PackedByteArray) -> Object:
 		_error("Serialize: %s is not a %s." % [_script_name(actual), _script_name(expected)])
 		return null
 	return instance
+
+
+## True when the bytes decode as a document of the expected class. Used to
+## reject a bad save before ending a run. A temporary instance may be built.
+func readable(expected: GDScript, bytes: PackedByteArray) -> bool:
+	var instance := read(expected, bytes)
+	if instance == null:
+		return false
+	if instance is Node and is_instance_valid(instance):
+		(instance as Node).free()
+	return true
+
+
+## Fills an existing instance from bytes. The root is not reconstructed.
+## Nested objects still use make_instance or script.new().
+func read_into(instance: Object, bytes: PackedByteArray) -> bool:
+	_failed = false
+	if codec == null:
+		_error("Serialize: read needs a codec.")
+		return false
+	if instance == null:
+		_error("Serialize: read_into needs an object.")
+		return false
+	var document := _document(bytes)
+	if document.is_empty():
+		return false
+	var type_name := String(document.get("_type", ""))
+	var script := _script_by_name(type_name)
+	if script == null:
+		_error("Serialize: %s is not a class." % type_name)
+		return false
+	var actual := instance.get_script() as GDScript
+	if not _script_accepts(actual, script):
+		_error("Serialize: %s is not a %s." % [_script_name(actual), type_name])
+		return false
+	return _fill_object(instance, document, script)
+
+
+func _document(bytes: PackedByteArray) -> Dictionary:
+	var document: Variant = codec.read(bytes)
+	if typeof(document) != TYPE_DICTIONARY or not (document as Dictionary).has("_type"):
+		if typeof(document) != TYPE_DICTIONARY or (document as Dictionary).is_empty():
+			return {}
+		_error("Serialize: the bytes are not a document.")
+		return {}
+	return document as Dictionary
 
 
 func _write_object(instance: Object, stack: Dictionary, force_all: bool) -> Dictionary:
@@ -149,13 +195,35 @@ func _read_object(document: Dictionary) -> Object:
 	if script == null:
 		_error("Serialize: %s is not a class." % type_name)
 		return null
-	var instance: Object = script.new()
+	var instance := _construct(script)
 	if instance == null:
 		_error("Serialize: %s could not be constructed." % type_name)
 		return null
+	if not _fill_object(instance, document, script):
+		if instance is Node and is_instance_valid(instance):
+			(instance as Node).free()
+		return null
+	return instance
+
+
+func _construct(script: GDScript) -> Object:
+	if not make_instance.is_valid():
+		return script.new()
+	# When set, the callable builds every nested object. null is a failure.
+	var made: Variant = make_instance.call(script)
+	if made is Object:
+		return made as Object
+	_failed = true
+	return null
+
+
+func _fill_object(instance: Object, document: Dictionary, script: GDScript) -> bool:
+	var type_name := String(script.get_global_name())
+	if type_name.is_empty():
+		type_name = String(document.get("_type", ""))
 	var plan := _plan(script, true)
 	if _failed or plan.is_empty():
-		return null
+		return false
 	var by_key := {}
 	for field in plan["fields"]:
 		by_key[String(field["key"])] = field
@@ -166,18 +234,18 @@ func _read_object(document: Dictionary) -> Object:
 			continue
 		if transient.has(key_text):
 			_error("Serialize: %s.%s is transient." % [type_name, key_text])
-			return null
+			return false
 		if not by_key.has(key_text):
 			_error("Serialize: %s has no field %s." % [type_name, key_text])
-			return null
+			return false
 		var decoded: Variant = _read_value(document[key])
 		if _failed:
-			return null
+			return false
 		var coerced: Variant = _coerce(int(by_key[key_text]["type"]), decoded)
 		if _failed:
-			return null
+			return false
 		instance.set(String(by_key[key_text]["name"]), coerced)
-	return instance
+	return not _failed
 
 
 func _read_value(value: Variant) -> Variant:

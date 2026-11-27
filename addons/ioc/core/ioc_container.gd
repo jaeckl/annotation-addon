@@ -640,6 +640,45 @@ func is_run_open() -> bool:
 	return _run_id != 0
 
 
+## Already-built products of the open run. Empty when no run is open. Does not
+## resolve. SaveSlots writes only from this list.
+func built_run() -> Array:
+	if _run_id == 0:
+		return []
+	var built: Dictionary = _scene_instances.get(_run_id, {})
+	var found: Array = []
+	for instance in built.values():
+		if instance != null and is_instance_valid(instance):
+			found.append(instance)
+	return found
+
+
+## Live borrowed pooled instances. Pass a scene root (or a node in that scene)
+## to limit the list. null returns every live hold.
+func pool_holds(root: Node = null) -> Array:
+	var scene_id := -1
+	if root != null:
+		var scene := _scene_root_of(root)
+		if scene == null:
+			return []
+		scene_id = scene.get_instance_id()
+	var found: Array = []
+	for id in _pool_live.keys():
+		var meta: Dictionary = _pool_known.get(id, {})
+		if scene_id != -1 and int(meta.get("scene_id", -1)) != scene_id:
+			continue
+		var instance: Object = _pool_live[id]
+		if instance != null and is_instance_valid(instance):
+			found.append(instance)
+	return found
+
+
+## Releases every live pooled hold for root, or every hold when root is null.
+func release_pool_holds(root: Node = null) -> void:
+	for instance in pool_holds(root):
+		release_pooled(instance)
+
+
 ## Opens the run. A @RunScope product is built on its first resolve after this.
 func start_run() -> bool:
 	if _tree == null or _run_holder == null or not is_instance_valid(_run_holder):
