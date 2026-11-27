@@ -96,7 +96,7 @@ func load(slot: String) -> bool:
 			hook.clear()
 			return false
 		var instance := runs.resolve(script)
-		if instance == null:
+		if instance == null or hook.apply_failed():
 			hook.clear()
 			push_error("Save: %s could not be built." % label)
 			return false

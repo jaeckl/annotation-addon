@@ -10,16 +10,23 @@ extends ContainerHook
 
 var _pending: Dictionary = {}
 var _body_parent: Node
+var _failed := false
 
 
 func arm(entries: Dictionary, body_parent: Node) -> void:
 	_pending = entries.duplicate()
 	_body_parent = body_parent
+	_failed = false
 
 
 func clear() -> void:
 	_pending.clear()
 	_body_parent = null
+	_failed = false
+
+
+func apply_failed() -> bool:
+	return _failed
 
 
 func before_ready(instance: Object) -> void:
@@ -38,6 +45,7 @@ func before_ready(instance: Object) -> void:
 	var ok := mapper.read_into(instance, bytes)
 	mapper.make_instance = previous
 	if not ok:
+		_failed = true
 		push_error("Save: %s could not be restored." % label)
 
 
