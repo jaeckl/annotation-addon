@@ -14,6 +14,9 @@ var fields: Array = []
 var packed: PackedScene
 ## True for a @RunScope product. The instance lives in the open run.
 var run := false
+## True for a @SceneScoped product. The instance lives on the open scene root
+## that asked for it. Node-conditioned products use _definition_scene instead.
+var scene := false
 ## Explicit init mark. &"" uses IOCContainer.default_init. &"eager" builds when
 ## the scope opens. &"lazy" waits for the first resolve.
 var init_mode: StringName = &""
