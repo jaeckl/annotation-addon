@@ -1,5 +1,5 @@
 {
-	"dirs": ["res://test/ioc", "res://test/serialize", "res://test/mvc", "res://test/fsm"],
+	"dirs": ["res://test/ioc", "res://test/serialize", "res://test/mvc", "res://test/fsm", "res://test/anim"],
 	"prefix": "test_",
 	"suffix": ".gd",
 	"should_exit": true,
