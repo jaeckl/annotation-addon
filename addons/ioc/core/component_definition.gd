@@ -17,3 +17,6 @@ var run := false
 ## Explicit init mark. &"" uses IOCContainer.default_init. &"eager" builds when
 ## the scope opens. &"lazy" waits for the first resolve.
 var init_mode: StringName = &""
+## True when the class or factory method carries @Primary. The default
+## CandidateSelector keeps only primary products when several still match.
+var primary := false

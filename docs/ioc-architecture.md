@@ -21,7 +21,7 @@ A factory method's type is the declared return type. `-> Goblin` matches a reque
 
 When more than one candidate matches, qualifier annotations pick one. `@Qualifier` is the built-in annotation, and its `value` string is an ordinary attribute. A user qualifier is another annotation class that extends `Qualifier`, for example `@Offline` or `@Genre` with its own attributes. The container does not special-case the string. `AnnotationUtils` already returns a subclass use when the query class is the base, so a query for `Qualifier` sees `@Offline` and `@Genre`.
 
-Each qualifier annotation on the injection point must be satisfied by one on the candidate: same annotation class, same attribute values. Extra qualifier annotations on the candidate are fine. Qualifier does not replace the type check. Zero candidates fail. Several candidates and no qualifier annotation on the injection point fail. Several candidates that still match the same qualifiers fail. The failure names the candidate scripts.
+Each qualifier annotation on the injection point must be satisfied by one on the candidate: same annotation class, same attribute values. Extra qualifier annotations on the candidate are fine. Qualifier does not replace the type check. Zero candidates fail. Several candidates that remain after the qualifier check fail unless exactly one of them is `@Primary`, or several are `@Primary` and that set is still larger than one. The failure names the candidate scripts that remain.
 
 The container does not inline that comparison. `QualifierMatcher`, `CandidateSelector`, and `ScopeHandler` are the policies. A custom qualifier annotation uses the default matcher. A user who needs a different comparison subclasses `QualifierMatcher`. Subclassing and calling `super` keeps the default and adds a rule.
 
@@ -164,7 +164,7 @@ The container calls a policy object. It does not contain a second copy of the ru
 | Policy | Default | How a user extends it |
 | --- | --- | --- |
 | `QualifierMatcher` | Same annotation class, same attribute values. Each required annotation needs one match. | A subclass of `Qualifier` needs no new matcher. One global subclass of `QualifierMatcher` replaces the default. |
-| `CandidateSelector` | Assignable type, then the matcher. Zero or several remaining definitions fail. | One global subclass replaces the default. That is where a primary rule would live. The default has none. |
+| `CandidateSelector` | Assignable type, then the matcher. For a single resolve, several remaining definitions narrow to `@Primary` when any exist. | One global subclass replaces the default. |
 | `Condition` | The annotation's `matches` method. | A subclass such as `@ConditionalOnProperty` is the check. The container calls `matches` on each one it finds. |
 | `ScopeHandler` | `AppScope` and `SceneScope`. | Every concrete global subclass is installed, including the two built-ins. `@Component.scope` names the handler script. |
 
@@ -208,19 +208,25 @@ flowchart TD
     ask["CandidateSelector.select(Enemy, annotations)"]
     list["definitions whose type is Enemy or a subclass"]
     match["QualifierMatcher.matches"]
+    primary{"single resolve and several remain?"}
+    keep["keep @Primary products when any exist"]
     count{"how many remain?"}
     fail0["fail: no candidate"]
     failN["fail: name every candidate"]
     one["that definition"]
     scope["definition.scope fetch or store"]
 
-    ask --> list --> match --> count
+    ask --> list --> match --> primary
+    primary -->|yes| keep --> count
+    primary -->|no| count
     count -->|0| fail0
     count -->|many| failN
     count -->|one| one --> scope
 ```
 
 `@Qualifier("brute")` on `Orc` and on the `Enemy` parameter selects `Orc`, because `value` is `"brute"` on both. `@Offline` on `Orc` and on the parameter selects `Orc` with no string. `@Genre("boss")` matches only a candidate whose `@Genre.kind` is `"boss"`. The same parameter with no qualifier annotation fails while both subclasses are registered. If `Goblin` is the only `Enemy`, the parameter needs no qualifier. A custom matcher is what runs inside `QualifierMatcher.matches`. The selector does not know the annotation classes.
+
+`@Primary` marks a preferred product when several still match after the type and qualifier checks. The mark sits on a `@Component` class or on a factory method. A single resolve keeps only the primary products when any exist. Zero primaries among several matches still fails. Several primaries that remain still fail. A typed `Array` injection skips that step and returns every match. A qualifier on the injection point still wins when it leaves one candidate. `@Primary` on a `@Configuration` class, on a field, on a method that is not a factory method, or without `@Component` is `push_error`.
 
 ## Registration
 
@@ -507,7 +513,7 @@ Framework settings use the same property environment as game settings. `IocPrope
 
 ## Out of this plan
 
-Inner-class scan and scripts without `class_name`. The default selector has no `@Primary`. A user `CandidateSelector` can add one. A general `SceneScope` handler is still later. Node conditions already keep their products on the scene root that admitted them. None of the condition checks becomes a branch inside the container.
+Inner-class scan and scripts without `class_name`. A general `SceneScope` handler is still later. Node conditions already keep their products on the scene root that admitted them. None of the condition checks becomes a branch inside the container.
 
 Parked from the game side, not designed yet. Physics, tweens, navigation, and the animation player stay direct engine calls.
 
