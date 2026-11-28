@@ -519,6 +519,6 @@ Finite state machines are a separate library. `addons/fsm` does not mention the 
 
 Inner-class scan and scripts without `class_name`. `@Component.scope` naming a user `ScopeHandler` is still later. None of the condition checks becomes a branch inside the container.
 
-Parked from the game side, not designed yet. Physics, tweens, navigation, and the animation player stay direct engine calls.
+`@ProcessMode` marks a Node `@Component` class. The argument is a `Node.ProcessMode` value such as `Node.PROCESS_MODE_WHEN_PAUSED` or `Node.PROCESS_MODE_ALWAYS`. When the container parents that product (app, run, or scene attach), it sets `process_mode` before `add_child`. A pooled borrow sets the marked mode instead of blind `INHERIT`; park still forces `DISABLED`. `@ProcessMode` without `@Component`, on a RefCounted, on a `@Configuration`, on a field or method, or with a value outside the Godot mode range is `push_error`.
 
-- A pause marker that sets a node's process mode when the container parents it.
+Parked from the game side, not designed yet. Physics, tweens, navigation, and the animation player stay direct engine calls.
