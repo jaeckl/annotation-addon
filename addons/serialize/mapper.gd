@@ -6,6 +6,8 @@ extends RefCounted
 ## Transform2D/3D, Color, NodePath, StringName, and Packed* arrays. A cycle is
 ## a push_error and write returns no bytes. A shared reference is written twice.
 ## make_instance may supply nested objects (for example a pooled borrow).
+## @OnBeforeSerialization runs on each object before its fields are read.
+## @OnAfterDeserialization runs after its fields are filled (nested included).
 
 const _LEAF_NAMES := {
 	"Vector2": true, "Vector2i": true, "Vector3": true, "Vector3i": true,
@@ -140,6 +142,10 @@ func _write_object(instance: Object, stack: Dictionary, force_all: bool) -> Dict
 		else:
 			_empty_reported[empty_key] = true
 			_error("Serialize: %s is not a document." % _script_name(script))
+		stack.erase(id)
+		return {}
+	_run_hooks(instance, plan["before"])
+	if _failed:
 		stack.erase(id)
 		return {}
 	var nested_force := force_all or _class_mode(script)
@@ -337,6 +343,9 @@ func _fill_object(instance: Object, document: Dictionary, script: GDScript) -> b
 		if _failed:
 			return false
 		instance.set(prop_name, advised)
+	if _failed:
+		return false
+	_run_hooks(instance, plan["after"])
 	return not _failed
 
 
@@ -598,9 +607,67 @@ func _plan(script: GDScript, force_all: bool) -> Dictionary:
 	if bad or _failed:
 		_plan_bad[cache_key] = true
 		return {}
-	var plan := {"fields": fields, "transient": transient}
+	var before := _collect_hooks(script, OnBeforeSerialization, "OnBeforeSerialization")
+	var after := _collect_hooks(script, OnAfterDeserialization, "OnAfterDeserialization")
+	if _failed:
+		_plan_bad[cache_key] = true
+		return {}
+	var plan := {
+		"fields": fields,
+		"transient": transient,
+		"before": before,
+		"after": after,
+	}
 	_plans[cache_key] = plan
 	return plan
+
+
+func _collect_hooks(root: GDScript, kind: GDScript, label: String) -> Array:
+	var names: Array = []
+	var current := root
+	# Keep walking after a bad mark so every illegal hook is reported.
+	while current != null:
+		var bucket := {"root": root, "script": current, "label": label, "names": []}
+		AnnotationUtils.for_each_annotation_initialized(kind, current, _take_hook.bind(bucket))
+		for method_name in bucket["names"]:
+			names.append(method_name)
+		current = current.get_base_script()
+	return names
+
+
+func _take_hook(_annotation: Object, target: Object, bucket: Dictionary) -> void:
+	var root := bucket["root"] as GDScript
+	var script := bucket["script"] as GDScript
+	var label := String(bucket["label"])
+	if not (target is FunctionInfo):
+		_plan_error(root, "Serialize: @%s on %s belongs on a method." % [label, _script_name(script)])
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		_plan_error(root, "Serialize: %s.%s @%s cannot be static." % [_script_name(script), info.name, label])
+		return
+	if _method_argc(script, StringName(String(info.name))) != 0:
+		_plan_error(root, "Serialize: %s.%s @%s must take nothing." % [_script_name(script), info.name, label])
+		return
+	(bucket["names"] as Array).append(String(info.name))
+
+
+func _method_argc(script: GDScript, method: StringName) -> int:
+	for info in script.get_script_method_list():
+		if StringName(info.get("name", "")) != method:
+			continue
+		return (info.get("args", []) as Array).size()
+	return -1
+
+
+func _run_hooks(instance: Object, methods: Array) -> void:
+	if instance == null or methods.is_empty():
+		return
+	for method_name in methods:
+		var result: Variant = instance.call(StringName(String(method_name)))
+		if result is Object and String((result as Object).get_class()) == "GDScriptFunctionState":
+			_error("Serialize: %s.%s cannot await." % [_owner_name(instance), String(method_name)])
+			return
 
 
 func _own_properties(script: GDScript) -> Array:
