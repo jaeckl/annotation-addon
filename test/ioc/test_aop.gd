@@ -96,7 +96,7 @@ func test_qualifier_and_type_still_select_the_woven_instance() -> void:
 	assert_eq(desk.get_script().get_base_script(), WovenDesk, "the proxy extends the component")
 	var wrong := _qualifier("nope")
 	assert_null(box.resolve(DeskBase, [wrong]), "a different qualifier does not match")
-	assert_engine_error("no component")
+	assert_push_error("no component")
 
 
 func test_aspect_is_not_woven() -> void:
@@ -148,8 +148,9 @@ func test_advice_marks_must_sit_on_an_aspect_method() -> void:
 func test_constructor_and_static_methods_are_not_advised() -> void:
 	var created := box.resolve(AdviceInit)
 	assert_not_null(created, "the component is still constructed")
-	assert_engine_error("AdviceInit._init cannot be advised")
-	assert_engine_error("AdviceInit.stat is static and cannot be advised")
+	assert_push_error("AdviceInit._init cannot be advised")
+	assert_push_error("AdviceInit.stat is static and cannot be advised")
+	assert_push_error("AdviceInit.stat is static and cannot be @Logged")
 
 
 func _qualifier(text: String) -> Qualifier:
