@@ -6,8 +6,10 @@ extends RefCounted
 ## Transform2D/3D, Color, NodePath, StringName, and Packed* arrays. A cycle is
 ## a push_error and write returns no bytes. A shared reference is written twice.
 ## make_instance may supply nested objects (for example a pooled borrow).
-## @OnBeforeSerialization runs on each object before its fields are read.
-## @OnAfterDeserialization runs after its fields are filled (nested included).
+## @OnBeforeSerialization / @OnAfterSerialization bracket a write.
+## @OnBeforeDeserialization / @OnAfterDeserialization bracket a read.
+## @Required fails when a key is missing on read; @Optional (default) leaves it.
+## @ReadOnly writes but does not fill; @WriteOnly fills but does not write.
 
 const _LEAF_NAMES := {
 	"Vector2": true, "Vector2i": true, "Vector3": true, "Vector3i": true,
@@ -144,13 +146,15 @@ func _write_object(instance: Object, stack: Dictionary, force_all: bool) -> Dict
 			_error("Serialize: %s is not a document." % _script_name(script))
 		stack.erase(id)
 		return {}
-	_run_hooks(instance, plan["before"])
+	_run_hooks(instance, plan["before_write"])
 	if _failed:
 		stack.erase(id)
 		return {}
 	var nested_force := force_all or _class_mode(script)
 	var document := {"_type": String(script.get_global_name())}
 	for field in fields:
+		if bool(field.get("write_only", false)):
+			continue
 		var prop_name := String(field["name"])
 		var advised: Variant = _advise_field(instance, StringName(prop_name), instance.get(prop_name))
 		if _failed:
@@ -160,6 +164,10 @@ func _write_object(instance: Object, stack: Dictionary, force_all: bool) -> Dict
 		if _failed:
 			stack.erase(id)
 			return {}
+	_run_hooks(instance, plan["after_write"])
+	if _failed:
+		stack.erase(id)
+		return {}
 	stack.erase(id)
 	return document
 
@@ -318,9 +326,15 @@ func _fill_object(instance: Object, document: Dictionary, script: GDScript) -> b
 	var plan := _plan(script, true)
 	if _failed or plan.is_empty():
 		return false
+	_run_hooks(instance, plan["before_read"])
+	if _failed:
+		return false
 	var by_key := {}
 	for field in plan["fields"]:
 		by_key[String(field["key"])] = field
+		if bool(field.get("required", false)) and not document.has(String(field["key"])):
+			_error("Serialize: %s.%s is required." % [type_name, String(field["key"])])
+			return false
 	var transient: Dictionary = plan["transient"]
 	for key in document:
 		var key_text := String(key)
@@ -332,20 +346,23 @@ func _fill_object(instance: Object, document: Dictionary, script: GDScript) -> b
 		if not by_key.has(key_text):
 			_error("Serialize: %s has no field %s." % [type_name, key_text])
 			return false
+		var field: Dictionary = by_key[key_text]
+		if bool(field.get("read_only", false)):
+			continue
 		var decoded: Variant = _read_value(document[key])
 		if _failed:
 			return false
-		var coerced: Variant = _coerce(int(by_key[key_text]["type"]), decoded)
+		var coerced: Variant = _coerce(int(field["type"]), decoded)
 		if _failed:
 			return false
-		var prop_name := String(by_key[key_text]["name"])
+		var prop_name := String(field["name"])
 		var advised: Variant = _advise_field(instance, StringName(prop_name), coerced)
 		if _failed:
 			return false
 		instance.set(prop_name, advised)
 	if _failed:
 		return false
-	_run_hooks(instance, plan["after"])
+	_run_hooks(instance, plan["after_read"])
 	return not _failed
 
 
@@ -571,8 +588,25 @@ func _plan(script: GDScript, force_all: bool) -> Dictionary:
 			var marked: Variant = AnnotationUtils.get_annotation_initialized(current, Serialize, prop_name)
 			var has_mark := marked is Object
 			var is_transient := AnnotationUtils.has_annotation(current, Transient, prop_name)
+			var is_required := AnnotationUtils.has_annotation(current, Required, prop_name)
+			var is_optional := AnnotationUtils.has_annotation(current, Optional, prop_name)
+			var is_read_only := AnnotationUtils.has_annotation(current, ReadOnly, prop_name)
+			var is_write_only := AnnotationUtils.has_annotation(current, WriteOnly, prop_name)
 			if has_mark and is_transient:
 				_plan_error(current, "Serialize: %s.%s is @Serialize and @Transient." % [_script_name(current), prop_name])
+				bad = true
+				break
+			if is_required and is_optional:
+				_plan_error(current, "Serialize: %s.%s is @Required and @Optional." % [_script_name(current), prop_name])
+				bad = true
+				break
+			if is_read_only and is_write_only:
+				_plan_error(current, "Serialize: %s.%s is @ReadOnly and @WriteOnly." % [_script_name(current), prop_name])
+				bad = true
+				break
+			if is_transient and (is_required or is_optional or is_read_only or is_write_only):
+				var clash := "Required" if is_required else ("Optional" if is_optional else ("ReadOnly" if is_read_only else "WriteOnly"))
+				_plan_error(current, "Serialize: %s.%s is @Transient and @%s." % [_script_name(current), prop_name, clash])
 				bad = true
 				break
 			if prop_name == "_type":
@@ -588,6 +622,11 @@ func _plan(script: GDScript, force_all: bool) -> Dictionary:
 				transient[key] = true
 				continue
 			if not mode and not has_mark:
+				if is_required or is_optional or is_read_only or is_write_only:
+					var unused := "Required" if is_required else ("Optional" if is_optional else ("ReadOnly" if is_read_only else "WriteOnly"))
+					_plan_error(current, "Serialize: %s.%s @%s needs @Serialize." % [_script_name(current), prop_name, unused])
+					bad = true
+					break
 				continue
 			if key == "_type":
 				_plan_error(current, "Serialize: %s.%s cannot use the key _type." % [_script_name(current), prop_name])
@@ -602,21 +641,28 @@ func _plan(script: GDScript, force_all: bool) -> Dictionary:
 				"name": prop_name,
 				"key": key,
 				"type": int(info.get("type", TYPE_NIL)),
+				"required": is_required,
+				"read_only": is_read_only,
+				"write_only": is_write_only,
 			})
 		current = current.get_base_script()
 	if bad or _failed:
 		_plan_bad[cache_key] = true
 		return {}
-	var before := _collect_hooks(script, OnBeforeSerialization, "OnBeforeSerialization")
-	var after := _collect_hooks(script, OnAfterDeserialization, "OnAfterDeserialization")
+	var before_write := _collect_hooks(script, OnBeforeSerialization, "OnBeforeSerialization")
+	var after_write := _collect_hooks(script, OnAfterSerialization, "OnAfterSerialization")
+	var before_read := _collect_hooks(script, OnBeforeDeserialization, "OnBeforeDeserialization")
+	var after_read := _collect_hooks(script, OnAfterDeserialization, "OnAfterDeserialization")
 	if _failed:
 		_plan_bad[cache_key] = true
 		return {}
 	var plan := {
 		"fields": fields,
 		"transient": transient,
-		"before": before,
-		"after": after,
+		"before_write": before_write,
+		"after_write": after_write,
+		"before_read": before_read,
+		"after_read": after_read,
 	}
 	_plans[cache_key] = plan
 	return plan
@@ -726,6 +772,10 @@ func _check_marks(script: GDScript) -> void:
 	var failed_before := _failed
 	AnnotationUtils.for_each_annotation_initialized(Serialize, script, _on_serialize.bind(script))
 	AnnotationUtils.for_each_annotation_initialized(Transient, script, _on_transient.bind(script))
+	AnnotationUtils.for_each_annotation_initialized(Required, script, _on_field_mark.bind(script, "Required"))
+	AnnotationUtils.for_each_annotation_initialized(Optional, script, _on_field_mark.bind(script, "Optional"))
+	AnnotationUtils.for_each_annotation_initialized(ReadOnly, script, _on_field_mark.bind(script, "ReadOnly"))
+	AnnotationUtils.for_each_annotation_initialized(WriteOnly, script, _on_field_mark.bind(script, "WriteOnly"))
 	_mark_seen[script] = true
 	_mark_bad[script] = _failed and not failed_before
 
@@ -744,6 +794,12 @@ func _on_transient(_annotation: Object, target: Object, script: GDScript) -> voi
 	if target is VariableInfo:
 		return
 	_plan_error(script, "Serialize: @Transient on %s belongs on a field." % _script_name(script))
+
+
+func _on_field_mark(_annotation: Object, target: Object, script: GDScript, label: String) -> void:
+	if target is VariableInfo:
+		return
+	_plan_error(script, "Serialize: @%s on %s belongs on a field." % [label, _script_name(script)])
 
 
 func _plan_error(script: GDScript, message: String) -> void:
