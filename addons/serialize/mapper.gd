@@ -2,9 +2,21 @@ class_name Mapper
 extends RefCounted
 
 ## Builds a document from @Serialize / @Transient and asks the codec for bytes.
-## Vector2, Vector3, Color, NodePath, and StringName are leaves. A cycle is a
-## push_error and write returns no bytes. A shared reference is written twice.
+## Math leaves: Vector2/3/4 (+i), Rect2(+i), AABB, Plane, Quaternion, Basis,
+## Transform2D/3D, Color, NodePath, StringName, and Packed* arrays. A cycle is
+## a push_error and write returns no bytes. A shared reference is written twice.
 ## make_instance may supply nested objects (for example a pooled borrow).
+
+const _LEAF_NAMES := {
+	"Vector2": true, "Vector2i": true, "Vector3": true, "Vector3i": true,
+	"Vector4": true, "Vector4i": true, "Color": true, "Rect2": true, "Rect2i": true,
+	"AABB": true, "Plane": true, "Quaternion": true, "Basis": true,
+	"Transform2D": true, "Transform3D": true, "NodePath": true, "StringName": true,
+	"PackedByteArray": true, "PackedInt32Array": true, "PackedInt64Array": true,
+	"PackedFloat32Array": true, "PackedFloat64Array": true, "PackedStringArray": true,
+	"PackedVector2Array": true, "PackedVector3Array": true, "PackedVector4Array": true,
+	"PackedColorArray": true,
+}
 
 var codec: Codec
 ## Optional Callable(script: GDScript) -> Object. Return null to use script.new().
@@ -156,14 +168,73 @@ func _write_value(value: Variant, stack: Dictionary, force_all: bool) -> Variant
 			return value
 		TYPE_VECTOR2:
 			return {"_type": "Vector2", "x": value.x, "y": value.y}
+		TYPE_VECTOR2I:
+			return {"_type": "Vector2i", "x": value.x, "y": value.y}
 		TYPE_VECTOR3:
 			return {"_type": "Vector3", "x": value.x, "y": value.y, "z": value.z}
+		TYPE_VECTOR3I:
+			return {"_type": "Vector3i", "x": value.x, "y": value.y, "z": value.z}
+		TYPE_VECTOR4:
+			return {"_type": "Vector4", "x": value.x, "y": value.y, "z": value.z, "w": value.w}
+		TYPE_VECTOR4I:
+			return {"_type": "Vector4i", "x": value.x, "y": value.y, "z": value.z, "w": value.w}
 		TYPE_COLOR:
 			return {"_type": "Color", "r": value.r, "g": value.g, "b": value.b, "a": value.a}
+		TYPE_RECT2:
+			return {
+				"_type": "Rect2",
+				"position": _write_value(value.position, stack, force_all),
+				"size": _write_value(value.size, stack, force_all),
+			}
+		TYPE_RECT2I:
+			return {
+				"_type": "Rect2i",
+				"position": _write_value(value.position, stack, force_all),
+				"size": _write_value(value.size, stack, force_all),
+			}
+		TYPE_AABB:
+			return {
+				"_type": "AABB",
+				"position": _write_value(value.position, stack, force_all),
+				"size": _write_value(value.size, stack, force_all),
+			}
+		TYPE_PLANE:
+			return {
+				"_type": "Plane",
+				"normal": _write_value(value.normal, stack, force_all),
+				"d": value.d,
+			}
+		TYPE_QUATERNION:
+			return {"_type": "Quaternion", "x": value.x, "y": value.y, "z": value.z, "w": value.w}
+		TYPE_BASIS:
+			return {
+				"_type": "Basis",
+				"x": _write_value(value.x, stack, force_all),
+				"y": _write_value(value.y, stack, force_all),
+				"z": _write_value(value.z, stack, force_all),
+			}
+		TYPE_TRANSFORM2D:
+			return {
+				"_type": "Transform2D",
+				"x": _write_value(value.x, stack, force_all),
+				"y": _write_value(value.y, stack, force_all),
+				"origin": _write_value(value.origin, stack, force_all),
+			}
+		TYPE_TRANSFORM3D:
+			return {
+				"_type": "Transform3D",
+				"basis": _write_value(value.basis, stack, force_all),
+				"origin": _write_value(value.origin, stack, force_all),
+			}
 		TYPE_NODE_PATH:
 			return {"_type": "NodePath", "path": String(value)}
 		TYPE_STRING_NAME:
 			return {"_type": "StringName", "name": String(value)}
+		TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY, \
+		TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY, TYPE_PACKED_STRING_ARRAY, \
+		TYPE_PACKED_VECTOR2_ARRAY, TYPE_PACKED_VECTOR3_ARRAY, TYPE_PACKED_COLOR_ARRAY, \
+		TYPE_PACKED_VECTOR4_ARRAY:
+			return _write_packed(value, stack, force_all)
 		TYPE_ARRAY:
 			var items: Array = []
 			for item in value:
@@ -191,6 +262,16 @@ func _write_value(value: Variant, stack: Dictionary, force_all: bool) -> Variant
 		_:
 			_error("Serialize: %s is not a document value." % type_string(typeof(value)))
 			return null
+
+
+func _write_packed(value: Variant, stack: Dictionary, force_all: bool) -> Variant:
+	var label := type_string(typeof(value))
+	var items: Array = []
+	for item in value:
+		items.append(_write_value(item, stack, force_all))
+		if _failed:
+			return null
+	return {"_type": label, "items": items}
 
 
 func _read_object(document: Dictionary) -> Object:
@@ -282,23 +363,94 @@ func _read_value(value: Variant) -> Variant:
 				return null
 		return mapped
 	var type_name := String(value["_type"])
-	if type_name == "Vector2":
-		return Vector2(_number(value, "x"), _number(value, "y"))
-	if type_name == "Vector3":
-		return Vector3(_number(value, "x"), _number(value, "y"), _number(value, "z"))
-	if type_name == "Color":
-		return Color(_number(value, "r"), _number(value, "g"), _number(value, "b"), _number(value, "a"))
-	if type_name == "NodePath":
-		if not value.has("path") or typeof(value["path"]) != TYPE_STRING:
-			_error("Serialize: NodePath needs path.")
-			return NodePath()
-		return NodePath(String(value["path"]))
-	if type_name == "StringName":
-		if not value.has("name") or typeof(value["name"]) != TYPE_STRING:
-			_error("Serialize: StringName needs name.")
-			return StringName()
-		return StringName(String(value["name"]))
+	if _LEAF_NAMES.has(type_name):
+		return _read_leaf(type_name, value)
 	return _read_object(value)
+
+
+func _read_leaf(type_name: String, value: Dictionary) -> Variant:
+	match type_name:
+		"Vector2":
+			return Vector2(_number(value, "x"), _number(value, "y"))
+		"Vector2i":
+			return Vector2i(_int(value, "x"), _int(value, "y"))
+		"Vector3":
+			return Vector3(_number(value, "x"), _number(value, "y"), _number(value, "z"))
+		"Vector3i":
+			return Vector3i(_int(value, "x"), _int(value, "y"), _int(value, "z"))
+		"Vector4":
+			return Vector4(_number(value, "x"), _number(value, "y"), _number(value, "z"), _number(value, "w"))
+		"Vector4i":
+			return Vector4i(_int(value, "x"), _int(value, "y"), _int(value, "z"), _int(value, "w"))
+		"Color":
+			return Color(_number(value, "r"), _number(value, "g"), _number(value, "b"), _number(value, "a"))
+		"Rect2":
+			return Rect2(_vector2_field(value, "position"), _vector2_field(value, "size"))
+		"Rect2i":
+			return Rect2i(_vector2i_field(value, "position"), _vector2i_field(value, "size"))
+		"AABB":
+			return AABB(_vector3_field(value, "position"), _vector3_field(value, "size"))
+		"Plane":
+			return Plane(_vector3_field(value, "normal"), _number(value, "d"))
+		"Quaternion":
+			return Quaternion(_number(value, "x"), _number(value, "y"), _number(value, "z"), _number(value, "w"))
+		"Basis":
+			return Basis(_vector3_field(value, "x"), _vector3_field(value, "y"), _vector3_field(value, "z"))
+		"Transform2D":
+			return Transform2D(_vector2_field(value, "x"), _vector2_field(value, "y"), _vector2_field(value, "origin"))
+		"Transform3D":
+			return Transform3D(_basis_field(value, "basis"), _vector3_field(value, "origin"))
+		"NodePath":
+			if not value.has("path") or typeof(value["path"]) != TYPE_STRING:
+				_error("Serialize: NodePath needs path.")
+				return NodePath()
+			return NodePath(String(value["path"]))
+		"StringName":
+			if not value.has("name") or typeof(value["name"]) != TYPE_STRING:
+				_error("Serialize: StringName needs name.")
+				return StringName()
+			return StringName(String(value["name"]))
+		"PackedByteArray", "PackedInt32Array", "PackedInt64Array", "PackedFloat32Array", \
+		"PackedFloat64Array", "PackedStringArray", "PackedVector2Array", "PackedVector3Array", \
+		"PackedVector4Array", "PackedColorArray":
+			return _read_packed(type_name, value)
+		_:
+			return null
+
+
+func _read_packed(type_name: String, value: Dictionary) -> Variant:
+	if not value.has("items") or typeof(value["items"]) != TYPE_ARRAY:
+		_error("Serialize: %s needs items." % type_name)
+		return null
+	var decoded: Array = []
+	for item in value["items"]:
+		decoded.append(_read_value(item))
+		if _failed:
+			return null
+	match type_name:
+		"PackedByteArray":
+			return PackedByteArray(decoded)
+		"PackedInt32Array":
+			return PackedInt32Array(decoded)
+		"PackedInt64Array":
+			return PackedInt64Array(decoded)
+		"PackedFloat32Array":
+			return PackedFloat32Array(decoded)
+		"PackedFloat64Array":
+			return PackedFloat64Array(decoded)
+		"PackedStringArray":
+			return PackedStringArray(decoded)
+		"PackedVector2Array":
+			return PackedVector2Array(decoded)
+		"PackedVector3Array":
+			return PackedVector3Array(decoded)
+		"PackedVector4Array":
+			return PackedVector4Array(decoded)
+		"PackedColorArray":
+			return PackedColorArray(decoded)
+		_:
+			_error("Serialize: %s is not a packed array." % type_name)
+			return null
 
 
 func _number(value: Dictionary, key: String) -> float:
@@ -311,6 +463,57 @@ func _number(value: Dictionary, key: String) -> float:
 		_error("Serialize: %s.%s is not a number." % [String(value.get("_type", "")), key])
 		return 0.0
 	return float(number)
+
+
+func _int(value: Dictionary, key: String) -> int:
+	return int(_number(value, key))
+
+
+func _vector2_field(value: Dictionary, key: String) -> Vector2:
+	var found: Variant = _nested_leaf(value, key, "Vector2")
+	return found as Vector2 if found is Vector2 else Vector2.ZERO
+
+
+func _vector2i_field(value: Dictionary, key: String) -> Vector2i:
+	var found: Variant = _nested_leaf(value, key, "Vector2i")
+	return found as Vector2i if found is Vector2i else Vector2i.ZERO
+
+
+func _vector3_field(value: Dictionary, key: String) -> Vector3:
+	var found: Variant = _nested_leaf(value, key, "Vector3")
+	return found as Vector3 if found is Vector3 else Vector3.ZERO
+
+
+func _basis_field(value: Dictionary, key: String) -> Basis:
+	var found: Variant = _nested_leaf(value, key, "Basis")
+	return found as Basis if found is Basis else Basis.IDENTITY
+
+
+func _nested_leaf(value: Dictionary, key: String, expected: String) -> Variant:
+	if not value.has(key):
+		_error("Serialize: %s needs %s." % [String(value.get("_type", "")), key])
+		return null
+	var decoded: Variant = _read_value(value[key])
+	if _failed:
+		return null
+	if typeof(decoded) != _leaf_typeof(expected):
+		_error("Serialize: %s.%s needs %s." % [String(value.get("_type", "")), key, expected])
+		return null
+	return decoded
+
+
+func _leaf_typeof(type_name: String) -> int:
+	match type_name:
+		"Vector2":
+			return TYPE_VECTOR2
+		"Vector2i":
+			return TYPE_VECTOR2I
+		"Vector3":
+			return TYPE_VECTOR3
+		"Basis":
+			return TYPE_BASIS
+		_:
+			return TYPE_NIL
 
 
 func _coerce(field_type: int, value: Variant) -> Variant:
@@ -509,7 +712,7 @@ func _script_accepts(actual: GDScript, expected: GDScript) -> bool:
 
 
 func _is_value_type(type_name: String) -> bool:
-	return type_name == "Vector2" or type_name == "Vector3" or type_name == "Color" or type_name == "NodePath" or type_name == "StringName"
+	return _LEAF_NAMES.has(type_name)
 
 
 func _script_name(script: GDScript) -> String:
