@@ -12,6 +12,11 @@ var app_scope: AppScope
 var environment: PropertyEnvironment
 var binder: PropertyBinder
 var parsers: Array = []
+## Default init for products without @Eager or @Lazy. "lazy" waits for the
+## first resolve. "eager" builds when the scope opens. @Eager and @Lazy always
+## win over this. Discover binds IocProperties from the property environment
+## (ioc/default_init) and copies that value here before eager products build.
+var default_init: String = "lazy"
 var _property_roots: Array = []
 var _scripts: Dictionary = {}
 var _factories: Dictionary = {}
@@ -230,11 +235,17 @@ func discover() -> void:
 	_register_event_publisher()
 	_register_instance_pools()
 	_register_runs()
+	_register_ioc_properties()
 	for global_name in _scripts:
 		_scan(_scripts[global_name])
 	_bind_scanned_properties()
 	_apply_deferred()
 	_resolve_hooks()
+	var app_products: Array = []
+	for definition in definitions:
+		if not (definition as ComponentDefinition).run:
+			app_products.append(definition)
+	_build_eager(app_products, null)
 	_open_existing_scenes()
 
 
@@ -430,6 +441,7 @@ func _open_scene(root: Node) -> void:
 	_active_scene_id = 0
 	_scene_bucket = []
 	_registry_products = []
+	_build_eager(bucket, root)
 	if is_instance_valid(root):
 		_call_scene_records(_app_scene_enter, root)
 
@@ -615,6 +627,34 @@ func _register_runs() -> void:
 	_remember(_newest_definition(), runs)
 
 
+## Binds framework settings from the property environment, like Spring Boot
+## enabling a @ConfigurationProperties type from auto-configuration. Does not
+## wait for a game @ConfigurationPropertiesScan. Applies default_init before
+## any eager product is built.
+func _register_ioc_properties() -> void:
+	var script := _scripts.get("IocProperties") as GDScript
+	if script == null:
+		push_error("IOC: IocProperties is missing.")
+		return
+	var props := IocProperties.new()
+	if not binder.bind(props, "ioc", environment):
+		return
+	_apply_default_init(props.default_init)
+	_property_seen[script.resource_path] = true
+	_add_definition(script, [], "IocProperties", script, null, &"", [], [])
+	_remember(_newest_definition(), props)
+
+
+func _apply_default_init(value: String) -> void:
+	var mode := String(value).strip_edges().to_lower()
+	if mode.is_empty():
+		return
+	if mode != "lazy" and mode != "eager":
+		push_error("IOC: ioc/default_init must be lazy or eager.")
+		return
+	default_init = mode
+
+
 func _install_runs() -> void:
 	if _tree == null or _tree.root == null or _run_holder != null:
 		return
@@ -679,7 +719,52 @@ func release_pool_holds(root: Node = null) -> void:
 		release_pooled(instance)
 
 
-## Opens the run. A @RunScope product is built on its first resolve after this.
+## Builds every product in the list that wants eager init. from_node is the
+## scene or run node the product is built from. Returns false when one of them
+## cannot be constructed.
+func _build_eager(products: Array, from_node: Node) -> bool:
+	var ok := true
+	for definition in products:
+		var product := definition as ComponentDefinition
+		if product == null or not _wants_eager(product):
+			continue
+		if _instance_of(product, from_node) == null:
+			ok = false
+	return ok
+
+
+func _wants_eager(definition: ComponentDefinition) -> bool:
+	if definition.init_mode == &"eager":
+		return true
+	if definition.init_mode == &"lazy":
+		return false
+	return String(default_init).strip_edges().to_lower() == "eager"
+
+
+## Reads @Eager / @Lazy on a class or factory method. Returns &"" for the
+## container default, &"eager", &"lazy", or &"bad" when both marks are present.
+func _read_init_mode(script: GDScript, method: StringName) -> StringName:
+	var has_eager := false
+	var has_lazy := false
+	if method == &"":
+		has_eager = AnnotationUtils.has_annotation(script, Eager)
+		has_lazy = AnnotationUtils.has_annotation(script, Lazy)
+	else:
+		has_eager = AnnotationUtils.has_annotation(script, Eager, method)
+		has_lazy = AnnotationUtils.has_annotation(script, Lazy, method)
+	if has_eager and has_lazy:
+		var who := _script_name(script) if method == &"" else "%s.%s" % [_script_name(script), method]
+		push_error("IOC: %s is @Eager and @Lazy." % who)
+		return &"bad"
+	if has_eager:
+		return &"eager"
+	if has_lazy:
+		return &"lazy"
+	return &""
+
+
+## Opens the run. Eager @RunScope products are built before RunStarted. A lazy
+## product waits for its first resolve after this.
 func start_run() -> bool:
 	if _tree == null or _run_holder == null or not is_instance_valid(_run_holder):
 		push_error("IOC: start needs a scene tree.")
@@ -695,6 +780,13 @@ func start_run() -> bool:
 	_run_id = _run_node.get_instance_id()
 	_scene_instances[_run_id] = {}
 	_run_holder.add_child(_run_node)
+	var run_products: Array = []
+	for definition in definitions:
+		if (definition as ComponentDefinition).run:
+			run_products.append(definition)
+	if not _build_eager(run_products, _run_node):
+		_drop_run()
+		return false
 	_publish(RunStarted.new(), null, [], true)
 	return true
 
@@ -2675,6 +2767,7 @@ func _scan(script: GDScript) -> void:
 	_reject_misplaced_release(script)
 	_reject_misplaced_scene(script)
 	_reject_misplaced_run(script)
+	_reject_misplaced_init(script)
 	var run := AnnotationUtils.has_annotation(script, RunScope)
 	if AnnotationUtils.has_annotation(script, Configuration):
 		if AnnotationUtils.has_annotation(script, Pooled):
@@ -2683,12 +2776,19 @@ func _scan(script: GDScript) -> void:
 			push_error("IOC: %s is @Scene on a configuration." % _script_name(script))
 		if run:
 			push_error("IOC: %s is @RunScope on a configuration. Mark the factory method." % _script_name(script))
+		if AnnotationUtils.has_annotation(script, Eager):
+			push_error("IOC: %s is @Eager on a configuration. Mark the factory method." % _script_name(script))
+		if AnnotationUtils.has_annotation(script, Lazy):
+			push_error("IOC: %s is @Lazy on a configuration. Mark the factory method." % _script_name(script))
 		_register_configuration(script)
 		return
 	if AnnotationUtils.has_annotation(script, Component):
 		if AnnotationUtils.has_annotation(script, Pooled):
 			if run:
 				push_error("IOC: %s is @RunScope and @Pooled. A product has one scope." % _script_name(script))
+				return
+			if AnnotationUtils.has_annotation(script, Eager) or AnnotationUtils.has_annotation(script, Lazy):
+				push_error("IOC: %s is @Pooled and cannot be @Eager or @Lazy." % _script_name(script))
 				return
 			_register_pooled(script)
 			return
@@ -2703,6 +2803,10 @@ func _scan(script: GDScript) -> void:
 		push_error("IOC: %s is @Scene without @Component." % _script_name(script))
 	if run:
 		push_error("IOC: %s is @RunScope without @Component." % _script_name(script))
+	if AnnotationUtils.has_annotation(script, Eager):
+		push_error("IOC: %s is @Eager without @Component." % _script_name(script))
+	if AnnotationUtils.has_annotation(script, Lazy):
+		push_error("IOC: %s is @Lazy without @Component." % _script_name(script))
 	_reject_orphan_methods(script)
 	_reject_loose_signals(script)
 
@@ -2735,6 +2839,23 @@ func _take_run_mark(_annotation: Object, target: Object, script: GDScript) -> vo
 		push_error("IOC: %s.%s is @RunScope and is not a factory method." % [_script_name(script), info.name])
 		return
 	push_error("IOC: @RunScope on %s belongs on a class or a factory method." % _script_name(script))
+
+
+func _reject_misplaced_init(script: GDScript) -> void:
+	AnnotationUtils.for_each_annotation_initialized(Eager, script, _take_init_mark.bind(script, "Eager"))
+	AnnotationUtils.for_each_annotation_initialized(Lazy, script, _take_init_mark.bind(script, "Lazy"))
+
+
+func _take_init_mark(_annotation: Object, target: Object, script: GDScript, label: String) -> void:
+	if target is ScriptInfo:
+		return
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		if AnnotationUtils.has_annotation(script, Configuration) and AnnotationUtils.has_annotation(script, Component, info.name):
+			return
+		push_error("IOC: %s.%s is @%s and is not a factory method." % [_script_name(script), info.name, label])
+		return
+	push_error("IOC: @%s on %s belongs on a class or a factory method." % [label, _script_name(script)])
 
 
 func _reject_misplaced_scene(script: GDScript) -> void:
@@ -3058,8 +3179,12 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 	_collect_input(return_script, true)
 	_collect_actions(return_script, true)
 	_collect_signals(return_script, true)
+	var init_mode := _read_init_mode(script, method)
+	if init_mode == &"bad":
+		return
 	_add_definition(return_script, _qualifiers(script, "func", method, &""), "%s.%s" % [_script_name(script), method], script, factory, method, parameters, fields)
 	_newest_definition().run = run
+	_newest_definition().init_mode = init_mode
 
 
 func _register_class_product(script: GDScript) -> void:
@@ -3092,8 +3217,12 @@ func _register_class_product(script: GDScript) -> void:
 	_collect_input(script, true)
 	_collect_actions(script, true)
 	_collect_signals(script, true)
+	var init_mode := _read_init_mode(script, &"")
+	if init_mode == &"bad":
+		return
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
 	_newest_definition().run = run
+	_newest_definition().init_mode = init_mode
 	if packed is PackedScene:
 		_newest_definition().packed = packed
 	_record_advice(script)
