@@ -5,9 +5,9 @@ extends RefCounted
 
 ## Play-time clicks and hotkeys. Esc pause stays on the battle node so it
 ## still works while the tree is paused (@UnhandledInput is skipped then).
-## Run deps go through Runs.resolve so Continue's battle-time load stays fresh.
 
-@Inject var runs: Runs
+@Inject var flow: TdMatchFlow
+@Inject var towers: TdTowerField
 
 var world: Node2D
 
@@ -16,19 +16,9 @@ func bind_world(root: Node2D) -> void:
 	world = root
 
 
-func _flow() -> TdMatchFlow:
-	return runs.resolve(TdMatchFlow) as TdMatchFlow if runs != null else null
-
-
-func _towers() -> TdTowerField:
-	return runs.resolve(TdTowerField) as TdTowerField if runs != null else null
-
-
 @UnhandledInput
 @OncePer("frame")
 func on_play_input(event: InputEvent) -> bool:
-	var flow := _flow()
-	var towers := _towers()
 	if flow == null or flow.state != TdMatchFlow.Phase.PLAYING:
 		return false
 	if world == null or towers == null:

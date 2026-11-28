@@ -58,14 +58,11 @@ func _continue() -> void:
 	if slots == null or not slots.has("td1"):
 		status.text = "No save in slot td1"
 		return
-	# Load happens in battle with body_parent set so nested @Pooled TdTower
-	# nodes borrow into the world — PersistHook's designed path.
+	# SaveContinueHook loads pending_slot when battle opens (before
+	# @SceneScoped), with body_parent = the battle root.
 	slots.pending_slot = "td1"
 	if runs != null and runs.is_open():
 		runs.end()
-	if runs != null and not runs.start():
-		status.text = "Could not start run"
-		return
 	get_tree().paused = false
 	get_tree().change_scene_to_file("res://game/td/battle/battle.tscn")
 
