@@ -40,11 +40,12 @@ func select_build(kind: StringName) -> void:
 		selected = null
 
 
+@OncePer("frame")
 func try_build_at(world_pos: Vector2) -> bool:
 	if parent == null or catalog == null or wallet == null or pools == null or settings == null:
 		return false
-	var cell := TdPath.world_to_cell(world_pos, float(settings.cell_size))
-	if not TdPath.is_buildable(cell):
+	var cell := TdPath.world_to_cell(world_pos, settings.cell_size_f())
+	if not TdPath.is_buildable(cell, settings.grid_width, settings.grid_height):
 		return false
 	if _occupied(cell):
 		return false
@@ -58,7 +59,7 @@ func try_build_at(world_pos: Vector2) -> bool:
 	if tower == null:
 		wallet.credit(cost)
 		return false
-	tower.setup(build_kind, 1, cell, spec, float(settings.cell_size), self)
+	tower.setup(build_kind, 1, cell, spec, self)
 	towers.append(tower)
 	_sync_save()
 	return true
@@ -133,8 +134,7 @@ func spawn_shot(tower: TdTower, target: TdCreep) -> void:
 		float(tower.spec.get("slow", 0.0)),
 		tower.spec.get("color", Color.WHITE),
 		self,
-		pools,
-		float(settings.cell_size) if settings != null else 40.0
+		pools
 	)
 	shots.append(shot)
 
@@ -163,11 +163,12 @@ func _occupied(cell: Vector2i) -> bool:
 
 
 func _at_world(pos: Vector2) -> TdTower:
+	var hit := settings.select_hit_radius if settings != null else 18.0
 	for item in towers:
 		var tower := item as TdTower
 		if tower == null:
 			continue
-		if tower.position.distance_to(pos) <= 18.0:
+		if tower.position.distance_to(pos) <= hit:
 			return tower
 	return null
 
@@ -200,5 +201,5 @@ func _restore_from_save() -> void:
 		var tower := pools.borrow(TdTower, parent) as TdTower
 		if tower == null:
 			continue
-		tower.setup(kind, level, cell, spec, float(settings.cell_size), self)
+		tower.setup(kind, level, cell, spec, self)
 		towers.append(tower)

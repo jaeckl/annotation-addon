@@ -3,38 +3,44 @@
 class_name TdTower
 extends Node2D
 
-## Placed tower. kind + level set on borrow; fire uses per-instance cooldown.
+## Placed tower. kind + level set on borrow; fire uses catalog cooldown.
+
+@Inject var settings: TdSettings
 
 var kind: StringName = &"arrow"
 var level: int = 1
 var cell: Vector2i = Vector2i.ZERO
-var cell_size: float = 40.0
 var selected := false
 var _cooldown_left: float = 0.0
 var spec: Dictionary = {}
 var _field: TdTowerField
 
 
-func setup(k: StringName, lvl: int, at: Vector2i, tower_spec: Dictionary, size: float, field: TdTowerField) -> void:
+func setup(k: StringName, lvl: int, at: Vector2i, tower_spec: Dictionary, field: TdTowerField) -> void:
 	kind = k
 	level = clampi(lvl, 1, 3)
 	cell = at
 	spec = tower_spec
-	cell_size = size
 	_field = field
 	_cooldown_left = 0.0
 	selected = false
-	position = TdPath.cell_to_world(cell, cell_size)
-	scale = Vector2.ONE * (0.85 + 0.1 * float(level))
+	position = TdPath.cell_to_world(cell, _cell())
+	scale = Vector2(0.2, 0.2)
 	modulate = Color(1, 1, 1, 1)
 	show()
 	queue_redraw()
+	pop_in()
+
+
+@TweenPlay(props = { "scale": Vector2(1, 1) }, duration = 0.18)
+func pop_in() -> void:
+	pass
 
 
 func range_px() -> float:
 	var ranges: Array = spec.get("range", [2.0])
 	var idx := mini(level - 1, ranges.size() - 1)
-	return float(ranges[idx]) * cell_size
+	return float(ranges[idx]) * _cell()
 
 
 func damage() -> float:
@@ -99,6 +105,10 @@ func park() -> void:
 	selected = false
 	_field = null
 	hide()
+
+
+func _cell() -> float:
+	return settings.cell_size_f() if settings != null else 40.0
 
 
 func _draw() -> void:

@@ -41,6 +41,7 @@ func _new_game() -> void:
 	box.resolve(TdTowerField)
 	box.resolve(TdWaveDirector)
 	box.resolve(TdMatchFlow)
+	box.resolve(TdHudModel)
 	get_tree().paused = false
 	get_tree().change_scene_to_file("res://game/td/battle/battle.tscn")
 

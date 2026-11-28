@@ -1,10 +1,7 @@
 class_name TdPath
 extends RefCounted
 
-## Grid path for the demo map. Cell size comes from TdSettings at runtime.
-
-const WIDTH := 16
-const HEIGHT := 12
+## Grid path for the demo map. Size and cell scale come from TdSettings.
 
 ## Waypoints in cell coordinates (center of each path cell).
 const CELLS: Array[Vector2i] = [
@@ -22,8 +19,8 @@ static func is_path(cell: Vector2i) -> bool:
 	return CELLS.has(cell)
 
 
-static func is_buildable(cell: Vector2i) -> bool:
-	if cell.x < 0 or cell.y < 0 or cell.x >= WIDTH or cell.y >= HEIGHT:
+static func is_buildable(cell: Vector2i, width: int, height: int) -> bool:
+	if cell.x < 0 or cell.y < 0 or cell.x >= width or cell.y >= height:
 		return false
 	return not is_path(cell)
 

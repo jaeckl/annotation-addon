@@ -5,7 +5,7 @@
 class_name TdWaveDirector
 extends RefCounted
 
-## Spawns creeps from a fixed wave table.
+## Spawns creeps from a fixed wave table. Cadence from TdSettings.
 
 @Inject var catalog: TdCatalog
 @Inject var settings: TdSettings
@@ -38,7 +38,7 @@ const WAVES: Array = [
 func bind_world(world: Node2D) -> void:
 	parent = world
 	if not _started:
-		_between_cd = 2.5
+		_between_cd = settings.wave_intro_seconds if settings != null else 2.5
 		_started = true
 
 
@@ -70,7 +70,7 @@ func tick(delta: float) -> void:
 		_spawn_cd -= delta
 		if _spawn_cd <= 0.0:
 			_spawn_next(plan)
-			_spawn_cd = 0.55
+			_spawn_cd = settings.spawn_interval_seconds if settings != null else 0.55
 		return
 	if creeps.is_empty():
 		_finish_wave()
@@ -87,7 +87,7 @@ func _spawn_next(plan: Array) -> void:
 		return
 	var spec := base.duplicate()
 	spec["kind"] = String(kind)
-	creep.setup(spec, events, pools, float(settings.cell_size) if settings != null else 40.0)
+	creep.setup(spec, events, pools)
 	creeps.append(creep)
 	spawned_in_wave += 1
 
@@ -106,7 +106,7 @@ func _finish_wave() -> void:
 			over.won = true
 			events.publish(over)
 		return
-	_between_cd = 3.0
+	_between_cd = settings.wave_gap_seconds if settings != null else 3.0
 
 
 func _plan_total(plan: Array) -> int:

@@ -1,38 +1,33 @@
 extends Node2D
 
-## Battle scene root. Not a @Component — filled on enter_tree by the container.
+## Battle world + pause/end overlays. HUD is TdHudView (MVC). Esc pause lives
+## here with PROCESS_MODE_ALWAYS so it still works while the tree is paused.
 
 @Inject var settings: TdSettings
-@Inject var wallet: TdWallet
 @Inject var waves: TdWaveDirector
 @Inject var towers: TdTowerField
 @Inject var flow: TdMatchFlow
-@Inject var catalog: TdCatalog
 @Inject var slots: SaveSlots
 @Inject var runs: Runs
+@Inject var battle_input: TdBattleInput
+@Inject var hud: TdHudController
 
-@onready var hud_gold: Label = $CanvasLayer/HUD/Gold
-@onready var hud_lives: Label = $CanvasLayer/HUD/Lives
-@onready var hud_wave: Label = $CanvasLayer/HUD/Wave
-@onready var hud_status: Label = $CanvasLayer/HUD/Status
-@onready var btn_upgrade: Button = $CanvasLayer/HUD/Upgrade
 @onready var pause_panel: Control = $CanvasLayer/Pause
 @onready var end_panel: Control = $CanvasLayer/End
 
 
 func _ready() -> void:
-	# Keep UI responsive while MatchFlow pauses the tree.
+	# Keep Esc / overlays alive while MatchFlow pauses the tree.
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	if towers != null:
 		towers.bind_world(self)
 	if waves != null:
 		waves.bind_world(self)
+	if battle_input != null:
+		battle_input.bind_world(self)
+
 	pause_panel.visible = false
 	end_panel.visible = false
-	btn_upgrade.pressed.connect(_on_upgrade)
-	$CanvasLayer/HUD/Arrow.pressed.connect(func(): _pick(&"arrow"))
-	$CanvasLayer/HUD/Cannon.pressed.connect(func(): _pick(&"cannon"))
-	$CanvasLayer/HUD/Slow.pressed.connect(func(): _pick(&"slow"))
 	$CanvasLayer/Pause/Resume.pressed.connect(_resume)
 	$CanvasLayer/Pause/Save.pressed.connect(_save)
 	$CanvasLayer/Pause/Menu.pressed.connect(_to_menu)
@@ -47,50 +42,19 @@ func _process(delta: float) -> void:
 			waves.advance_creeps(delta)
 		if towers != null and waves != null:
 			towers.tick(delta, waves.creeps)
-	_refresh_hud()
 	_refresh_panels()
 	queue_redraw()
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# @UnhandledInput products are skipped while the tree is paused, so Esc
+	# must stay on this ALWAYS node.
 	if flow == null:
 		return
 	if event.is_action_pressed("ui_cancel"):
 		if flow.state == TdMatchFlow.Phase.PLAYING or flow.state == TdMatchFlow.Phase.PAUSED:
 			flow.toggle_pause()
 		get_viewport().set_input_as_handled()
-		return
-	if flow.state != TdMatchFlow.Phase.PLAYING:
-		return
-	if event is InputEventKey and event.pressed and not event.echo:
-		match event.keycode:
-			KEY_1:
-				_pick(&"arrow")
-			KEY_2:
-				_pick(&"cannon")
-			KEY_3:
-				_pick(&"slow")
-			KEY_U:
-				_on_upgrade()
-	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		var local := to_local(get_global_mouse_position())
-		if towers != null:
-			var before := towers.towers.size()
-			if towers.try_build_at(local):
-				pass
-			elif towers.towers.size() == before:
-				towers.try_select_or_upgrade(local)
-		get_viewport().set_input_as_handled()
-
-
-func _pick(kind: StringName) -> void:
-	if towers != null:
-		towers.select_build(kind)
-
-
-func _on_upgrade() -> void:
-	if towers != null:
-		towers.upgrade_selected()
 
 
 func _resume() -> void:
@@ -113,27 +77,6 @@ func _to_menu() -> void:
 	tree.change_scene_to_file("res://game/td/td_main.tscn")
 
 
-func _refresh_hud() -> void:
-	if wallet != null:
-		hud_gold.text = "Gold: %d" % wallet.gold
-		hud_lives.text = "Lives: %d" % wallet.lives
-	if waves != null:
-		hud_wave.text = "Wave: %d / %d" % [waves.current_display(), waves.wave_count()]
-	if towers != null and catalog != null:
-		var spec := catalog.tower(towers.build_kind)
-		hud_status.text = "Build: %s (%d)  |  click tower twice or U to upgrade" % [
-			str(spec.get("label", towers.build_kind)),
-			int(spec.get("build_cost", 0)),
-		]
-		if towers.selected != null:
-			var cost := towers.selected.upgrade_cost()
-			btn_upgrade.text = "MAX" if cost < 0 else "Upgrade (%d)" % cost
-			btn_upgrade.disabled = cost < 0
-		else:
-			btn_upgrade.text = "Upgrade"
-			btn_upgrade.disabled = true
-
-
 func _refresh_panels() -> void:
 	if flow == null:
 		return
@@ -146,9 +89,11 @@ func _refresh_panels() -> void:
 
 
 func _draw() -> void:
-	var size := float(settings.cell_size) if settings != null else 40.0
-	for y in TdPath.HEIGHT:
-		for x in TdPath.WIDTH:
+	if settings == null:
+		return
+	var size := settings.cell_size_f()
+	for y in settings.grid_height:
+		for x in settings.grid_width:
 			var cell := Vector2i(x, y)
 			var rect := Rect2(Vector2(cell) * size, Vector2(size, size))
 			var color := Color(0.18, 0.2, 0.24) if TdPath.is_path(cell) else Color(0.12, 0.14, 0.16)

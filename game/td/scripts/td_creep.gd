@@ -5,6 +5,8 @@ extends Node2D
 
 ## Pooled enemy. Configure after borrow, then release when dead or leaked.
 
+@Inject var settings: TdSettings
+
 var kind: StringName = &"runner"
 var hp: float = 1.0
 var max_hp: float = 1.0
@@ -16,13 +18,12 @@ var tint: Color = Color.WHITE
 var waypoint: int = 0
 var alive := false
 var slow_timer: float = 0.0
-var cell_size: float = 40.0
 
 var _events: EventPublisher
 var _pools: InstancePools
 
 
-func setup(spec: Dictionary, events: EventPublisher, pools: InstancePools, size: float) -> void:
+func setup(spec: Dictionary, events: EventPublisher, pools: InstancePools) -> void:
 	kind = StringName(str(spec.get("kind", "runner")))
 	max_hp = float(spec.get("hp", 10))
 	hp = max_hp
@@ -34,10 +35,9 @@ func setup(spec: Dictionary, events: EventPublisher, pools: InstancePools, size:
 	waypoint = 0
 	alive = true
 	slow_timer = 0.0
-	cell_size = size
 	_events = events
 	_pools = pools
-	position = TdPath.waypoint_world(0, cell_size)
+	position = TdPath.waypoint_world(0, _cell())
 	modulate = Color(1, 1, 1, 1)
 	scale = Vector2.ONE
 	show()
@@ -58,6 +58,7 @@ func hurt(amount: float) -> void:
 		_die()
 
 
+@Timed(8.0)
 func advance(delta: float) -> void:
 	if not alive:
 		return
@@ -65,7 +66,7 @@ func advance(delta: float) -> void:
 		slow_timer -= delta
 		if slow_timer <= 0.0:
 			speed = base_speed
-	var target := TdPath.waypoint_world(waypoint, cell_size)
+	var target := TdPath.waypoint_world(waypoint, _cell())
 	var offset := target - position
 	var step := speed * delta
 	if offset.length() <= step:
@@ -111,6 +112,10 @@ func _recycle() -> void:
 func park() -> void:
 	alive = false
 	hide()
+
+
+func _cell() -> float:
+	return settings.cell_size_f() if settings != null else 40.0
 
 
 func _draw() -> void:
