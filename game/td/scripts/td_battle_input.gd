@@ -39,10 +39,10 @@ func on_play_input(event: InputEvent) -> bool:
 				return true
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		var local := world.to_local(world.get_global_mouse_position())
-		var before := towers.towers.size()
+		var before := towers.live.size()
 		if towers.try_build_at(local):
 			return true
-		if towers.towers.size() == before:
+		if towers.live.size() == before:
 			towers.try_select_or_upgrade(local)
 		return true
 	return false

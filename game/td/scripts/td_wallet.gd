@@ -10,13 +10,26 @@ extends RefCounted
 @Inject var settings: TdSettings
 @Inject var events: EventPublisher
 
-@Serialize var gold: int = 0
-@Serialize var lives: int = 0
+@Serialize
+@Required
+var gold: int = 0
+@Serialize
+@Required
+var lives: int = 0
+
+@Transient var _from_save := false
+
+
+@OnAfterDeserialization
+func mark_loaded() -> void:
+	_from_save = true
 
 
 @Ready
 func boot() -> void:
 	if settings == null:
+		return
+	if _from_save:
 		return
 	if gold == 0 and lives == 0:
 		gold = settings.start_gold

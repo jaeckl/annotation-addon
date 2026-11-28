@@ -12,15 +12,22 @@ extends RefCounted
 @Inject var pools: InstancePools
 @Inject var events: EventPublisher
 
-@Serialize var wave_index: int = 0
-@Serialize var spawned_in_wave: int = 0
-@Serialize var active: bool = false
+@Serialize
+@Required
+var wave_index: int = 0
+@Serialize
+@Optional
+var spawned_in_wave: int = 0
+@Serialize
+@Optional
+var active: bool = false
 
-var creeps: Array = []
-var parent: Node2D
-var _spawn_cd: float = 0.0
-var _between_cd: float = 3.0
-var _started := false
+@Transient var creeps: Array = []
+@Transient var parent: Node2D
+@Transient var _spawn_cd: float = 0.0
+@Transient var _between_cd: float = 3.0
+@Transient var _started := false
+@Transient var _from_save := false
 
 const WAVES: Array = [
 	[{"kind": "runner", "count": 6}],
@@ -35,11 +42,21 @@ const WAVES: Array = [
 ]
 
 
+@OnAfterDeserialization
+func mark_loaded() -> void:
+	_from_save = true
+	_spawn_cd = 0.0
+	_between_cd = 0.0 if active else (settings.wave_gap_seconds if settings != null else 3.0)
+
+
 func bind_world(world: Node2D) -> void:
 	parent = world
-	if not _started:
-		_between_cd = settings.wave_intro_seconds if settings != null else 2.5
-		_started = true
+	if _started:
+		return
+	_started = true
+	if _from_save:
+		return
+	_between_cd = settings.wave_intro_seconds if settings != null else 2.5
 
 
 func wave_count() -> int:
