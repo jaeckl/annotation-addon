@@ -270,7 +270,7 @@ func _resolve_one(type: GDScript, qualifiers: Array, from_node: Node) -> Object:
 	if _pooled.has(type):
 		push_error("IOC: %s is pooled. Borrow it." % _script_name(type))
 		return null
-	var found: Array = selector.select(_visible_definitions(from_node), type, qualifiers)
+	var found: Array = selector.prefer_primary(selector.select(_visible_definitions(from_node), type, qualifiers))
 	if found.size() != 1:
 		_report_selection(type, qualifiers, found)
 		return null
@@ -824,7 +824,7 @@ func resolve_run(type: GDScript, qualifiers: Array = []) -> Object:
 	for definition in definitions:
 		if (definition as ComponentDefinition).run:
 			candidates.append(definition)
-	var found: Array = selector.select(candidates, type, qualifiers)
+	var found: Array = selector.prefer_primary(selector.select(candidates, type, qualifiers))
 	if found.is_empty():
 		push_error("IOC: no run product for %s [%s]." % [_script_name(type), _describe_qualifiers(qualifiers)])
 		return null
@@ -2768,6 +2768,7 @@ func _scan(script: GDScript) -> void:
 	_reject_misplaced_scene(script)
 	_reject_misplaced_run(script)
 	_reject_misplaced_init(script)
+	_reject_misplaced_primary(script)
 	var run := AnnotationUtils.has_annotation(script, RunScope)
 	if AnnotationUtils.has_annotation(script, Configuration):
 		if AnnotationUtils.has_annotation(script, Pooled):
@@ -2780,6 +2781,8 @@ func _scan(script: GDScript) -> void:
 			push_error("IOC: %s is @Eager on a configuration. Mark the factory method." % _script_name(script))
 		if AnnotationUtils.has_annotation(script, Lazy):
 			push_error("IOC: %s is @Lazy on a configuration. Mark the factory method." % _script_name(script))
+		if AnnotationUtils.has_annotation(script, Primary):
+			push_error("IOC: %s is @Primary on a configuration. Mark the factory method." % _script_name(script))
 		_register_configuration(script)
 		return
 	if AnnotationUtils.has_annotation(script, Component):
@@ -2807,6 +2810,8 @@ func _scan(script: GDScript) -> void:
 		push_error("IOC: %s is @Eager without @Component." % _script_name(script))
 	if AnnotationUtils.has_annotation(script, Lazy):
 		push_error("IOC: %s is @Lazy without @Component." % _script_name(script))
+	if AnnotationUtils.has_annotation(script, Primary):
+		push_error("IOC: %s is @Primary without @Component." % _script_name(script))
 	_reject_orphan_methods(script)
 	_reject_loose_signals(script)
 
@@ -2856,6 +2861,22 @@ func _take_init_mark(_annotation: Object, target: Object, script: GDScript, labe
 		push_error("IOC: %s.%s is @%s and is not a factory method." % [_script_name(script), info.name, label])
 		return
 	push_error("IOC: @%s on %s belongs on a class or a factory method." % [label, _script_name(script)])
+
+
+func _reject_misplaced_primary(script: GDScript) -> void:
+	AnnotationUtils.for_each_annotation_initialized(Primary, script, _take_primary_mark.bind(script))
+
+
+func _take_primary_mark(_annotation: Object, target: Object, script: GDScript) -> void:
+	if target is ScriptInfo:
+		return
+	if target is FunctionInfo:
+		var info := target as FunctionInfo
+		if AnnotationUtils.has_annotation(script, Configuration) and AnnotationUtils.has_annotation(script, Component, info.name):
+			return
+		push_error("IOC: %s.%s is @Primary and is not a factory method." % [_script_name(script), info.name])
+		return
+	push_error("IOC: @Primary on %s belongs on a class or a factory method." % _script_name(script))
 
 
 func _reject_misplaced_scene(script: GDScript) -> void:
@@ -3185,6 +3206,7 @@ func _register_method(script: GDScript, factory: Object, method: StringName) -> 
 	_add_definition(return_script, _qualifiers(script, "func", method, &""), "%s.%s" % [_script_name(script), method], script, factory, method, parameters, fields)
 	_newest_definition().run = run
 	_newest_definition().init_mode = init_mode
+	_newest_definition().primary = AnnotationUtils.has_annotation(script, Primary, method)
 
 
 func _register_class_product(script: GDScript) -> void:
@@ -3223,6 +3245,7 @@ func _register_class_product(script: GDScript) -> void:
 	_add_definition(script, _qualifiers(script, "script", &"", &""), _script_name(script), script, null, &"", parameters, fields)
 	_newest_definition().run = run
 	_newest_definition().init_mode = init_mode
+	_newest_definition().primary = AnnotationUtils.has_annotation(script, Primary)
 	if packed is PackedScene:
 		_newest_definition().packed = packed
 	_record_advice(script)
