@@ -11,10 +11,12 @@ func _process(delta: float) -> void:
 	if container != null and is_instance_valid(container):
 		container.run_input_actions()
 		container.run_scheduled(delta)
+		container.run_cooldowns(delta)
 		container.run_process(delta)
 
 
 func _physics_process(delta: float) -> void:
 	if container != null and is_instance_valid(container):
 		container.run_scheduled_physics()
+		container.run_cooldowns_physics()
 		container.run_physics_process(delta)
