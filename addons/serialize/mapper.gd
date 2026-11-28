@@ -123,9 +123,10 @@ func _write_object(instance: Object, stack: Dictionary, force_all: bool) -> Dict
 	if instance == null or instance.get_script() == null:
 		_error("Serialize: %s has no script." % (instance.get_class() if instance != null else "null"))
 		return {}
-	var script := instance.get_script() as GDScript
-	if String(script.get_global_name()).is_empty():
-		_error("Serialize: %s needs a class_name." % _script_name(script))
+	# Woven proxies have no class_name — walk to the named base script.
+	var script := _named_script(instance.get_script() as GDScript)
+	if script == null or String(script.get_global_name()).is_empty():
+		_error("Serialize: %s needs a class_name." % _script_name(instance.get_script() as GDScript))
 		return {}
 	var id := instance.get_instance_id()
 	if stack.has(id):
@@ -838,10 +839,20 @@ func _is_value_type(type_name: String) -> bool:
 	return _LEAF_NAMES.has(type_name)
 
 
+func _named_script(script: GDScript) -> GDScript:
+	var current := script
+	while current != null:
+		if not String(current.get_global_name()).is_empty():
+			return current
+		current = current.get_base_script()
+	return script
+
+
 func _script_name(script: GDScript) -> String:
 	if script == null:
 		return "?"
-	var global_name := String(script.get_global_name())
+	var named := _named_script(script)
+	var global_name := String(named.get_global_name()) if named != null else ""
 	if global_name.is_empty():
 		return script.resource_path.get_file()
 	return global_name
