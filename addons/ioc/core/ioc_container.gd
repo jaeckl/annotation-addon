@@ -76,6 +76,7 @@ var _pool_limit: Dictionary = {}
 var _pool_release: Dictionary = {}
 var _pool_moving := false
 var _hooks: Array = []
+var _cooldowns: CooldownBook
 var _run_holder: Node
 var _run_node: Node
 var _run_id := 0
@@ -134,6 +135,7 @@ func shutdown() -> void:
 		_tree.node_removed.disconnect(_on_node_removed)
 	_drop_frame()
 	_drop_input()
+	_cooldowns = null
 	_tree = null
 
 
@@ -235,6 +237,7 @@ func discover() -> void:
 		_scripts[String(entry.get("class", ""))] = script
 	_register_event_publisher()
 	_register_instance_pools()
+	_register_cooldown_book()
 	_register_runs()
 	_register_ioc_properties()
 	for global_name in _scripts:
@@ -988,6 +991,16 @@ func _register_instance_pools() -> void:
 	_remember(_newest_definition(), pools)
 
 
+func _register_cooldown_book() -> void:
+	var script := _scripts.get("CooldownBook") as GDScript
+	if script == null:
+		push_error("IOC: CooldownBook is missing.")
+		return
+	_cooldowns = CooldownBook.new()
+	_add_definition(script, [], "CooldownBook", script, null, &"", [], [])
+	_remember(_newest_definition(), _cooldowns)
+
+
 func borrow_pooled(type: GDScript, parent: Node) -> Object:
 	if type == null:
 		push_error("IOC: borrow needs a class.")
@@ -1042,6 +1055,7 @@ func release_pooled(instance: Object) -> void:
 			(instance as Node).queue_free()
 		return
 	_call_on_release(instance, script)
+	_forget_cooldowns(instance)
 	if not is_instance_valid(instance) or not _pool_known.has(id):
 		return
 	if instance is Node and (instance as Node).is_queued_for_deletion():
@@ -1342,6 +1356,18 @@ func run_physics_process(delta: float) -> void:
 	_run_ticks(_app_physics, _scene_physics, delta)
 
 
+## Advances @Cooldown windows that use idle time or idle frames.
+func run_cooldowns(delta: float) -> void:
+	if _cooldowns != null:
+		_cooldowns.tick_idle(delta)
+
+
+## Advances @Cooldown windows that count physics frames, and OncePer physics stamps.
+func run_cooldowns_physics() -> void:
+	if _cooldowns != null:
+		_cooldowns.tick_physics()
+
+
 ## Calls due @Scheduled methods that use idle time, idle frames, or cron.
 func run_scheduled(delta: float) -> void:
 	_run_schedules(_app_schedules, _scene_schedules, delta)
@@ -1635,6 +1661,7 @@ func _destroy_records(records: Array) -> void:
 		var instance: Object = group.get("instance")
 		for call in calls:
 			_call_lifecycle(instance, call)
+		_forget_cooldowns(instance)
 
 
 func _collect_lifecycle(script: GDScript, report: bool) -> Array:
@@ -2831,6 +2858,7 @@ func _scan(script: GDScript) -> void:
 	_reject_misplaced_init(script)
 	_reject_misplaced_primary(script)
 	_reject_misplaced_process_mode(script)
+	_reject_misplaced_gates(script)
 	var run := AnnotationUtils.has_annotation(script, RunScope)
 	var scene_scoped := AnnotationUtils.has_annotation(script, SceneScoped)
 	if AnnotationUtils.has_annotation(script, Configuration):
@@ -2959,6 +2987,56 @@ func _take_init_mark(_annotation: Object, target: Object, script: GDScript, labe
 		push_error("IOC: %s.%s is @%s and is not a factory method." % [_script_name(script), info.name, label])
 		return
 	push_error("IOC: @%s on %s belongs on a class or a factory method." % [label, _script_name(script)])
+
+
+func _forget_cooldowns(instance: Object) -> void:
+	if _cooldowns != null:
+		_cooldowns.forget(instance)
+
+
+func _reject_misplaced_gates(script: GDScript) -> void:
+	var seen := {}
+	AnnotationUtils.for_each_annotation_initialized(Cooldown, script, _take_gate_mark.bind(script, "Cooldown", seen))
+	AnnotationUtils.for_each_annotation_initialized(OncePer, script, _take_gate_mark.bind(script, "OncePer", seen))
+
+
+func _take_gate_mark(annotation: Object, target: Object, script: GDScript, label: String, seen: Dictionary) -> void:
+	if not (target is FunctionInfo):
+		push_error("IOC: @%s on %s belongs on a method." % [label, _script_name(script)])
+		return
+	var info := target as FunctionInfo
+	if info.is_static:
+		push_error("IOC: %s.%s is static and cannot be @%s." % [_script_name(script), info.name, label])
+		return
+	if AnnotationUtils.has_annotation(script, Configuration):
+		push_error("IOC: %s.%s is @%s on a configuration. Put it on a component." % [_script_name(script), info.name, label])
+		return
+	var key := String(info.name)
+	if seen.has(key) and String(seen[key]) != label:
+		push_error("IOC: %s.%s cannot be @Cooldown and @OncePer." % [_script_name(script), info.name])
+		return
+	seen[key] = label
+	if label == "Cooldown":
+		_check_cooldown_value(script, info.name, annotation)
+	else:
+		_check_once_value(script, info.name, annotation)
+
+
+func _check_cooldown_value(script: GDScript, method: StringName, annotation: Object) -> void:
+	var text := ""
+	if annotation != null:
+		text = String(annotation.get("value")).strip_edges()
+	var spec := ScheduleSpec.parse(text)
+	if text == "" or not spec.error.is_empty() or spec.kind == ScheduleSpec.CRON:
+		push_error("IOC: %s.%s @Cooldown needs a delay like 500ms, 1s, 10f, or 10pf." % [_script_name(script), method])
+
+
+func _check_once_value(script: GDScript, method: StringName, annotation: Object) -> void:
+	var text := ""
+	if annotation != null:
+		text = String(annotation.get("value")).strip_edges().to_lower()
+	if text != "frame" and text != "physics_frame":
+		push_error("IOC: %s.%s @OncePer needs frame or physics_frame." % [_script_name(script), method])
 
 
 func _reject_misplaced_process_mode(script: GDScript) -> void:
