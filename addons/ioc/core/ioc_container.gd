@@ -1084,7 +1084,7 @@ func _place_pooled(instance: Object, parent: Node) -> void:
 	var node := instance as Node
 	if not is_instance_valid(node):
 		return
-	node.process_mode = Node.PROCESS_MODE_INHERIT
+	_apply_process_mode(node, Node.PROCESS_MODE_INHERIT)
 	if node is CanvasItem:
 		(node as CanvasItem).visible = true
 	if node.get_parent() == parent:
@@ -1195,6 +1195,7 @@ func _remember(definition: ComponentDefinition, instance: Object, scene_id: int 
 	_store_input(instance, scene_id, report)
 	_store_actions(instance, scene_id, report)
 	_arm_signals(instance, scene_id, report)
+	_apply_process_mode(instance)
 	if scene_id != 0:
 		if definition.run:
 			var bucket: Dictionary = _scene_instances.get(scene_id, {})
@@ -2829,6 +2830,7 @@ func _scan(script: GDScript) -> void:
 	_reject_misplaced_scene_scope(script)
 	_reject_misplaced_init(script)
 	_reject_misplaced_primary(script)
+	_reject_misplaced_process_mode(script)
 	var run := AnnotationUtils.has_annotation(script, RunScope)
 	var scene_scoped := AnnotationUtils.has_annotation(script, SceneScoped)
 	if AnnotationUtils.has_annotation(script, Configuration):
@@ -2846,6 +2848,8 @@ func _scan(script: GDScript) -> void:
 			push_error("IOC: %s is @Lazy on a configuration. Mark the factory method." % _script_name(script))
 		if AnnotationUtils.has_annotation(script, Primary):
 			push_error("IOC: %s is @Primary on a configuration. Mark the factory method." % _script_name(script))
+		if AnnotationUtils.has_annotation(script, ProcessMode):
+			push_error("IOC: %s is @ProcessMode on a configuration." % _script_name(script))
 		_register_configuration(script)
 		return
 	if AnnotationUtils.has_annotation(script, Component):
@@ -2886,6 +2890,8 @@ func _scan(script: GDScript) -> void:
 		push_error("IOC: %s is @Lazy without @Component." % _script_name(script))
 	if AnnotationUtils.has_annotation(script, Primary):
 		push_error("IOC: %s is @Primary without @Component." % _script_name(script))
+	if AnnotationUtils.has_annotation(script, ProcessMode):
+		push_error("IOC: %s is @ProcessMode without @Component." % _script_name(script))
 	_reject_orphan_methods(script)
 	_reject_loose_signals(script)
 
@@ -2953,6 +2959,52 @@ func _take_init_mark(_annotation: Object, target: Object, script: GDScript, labe
 		push_error("IOC: %s.%s is @%s and is not a factory method." % [_script_name(script), info.name, label])
 		return
 	push_error("IOC: @%s on %s belongs on a class or a factory method." % [label, _script_name(script)])
+
+
+func _reject_misplaced_process_mode(script: GDScript) -> void:
+	AnnotationUtils.for_each_annotation_initialized(ProcessMode, script, _take_process_mode_mark.bind(script))
+
+
+func _take_process_mode_mark(_annotation: Object, target: Object, script: GDScript) -> void:
+	if target is ScriptInfo:
+		return
+	push_error("IOC: @ProcessMode on %s belongs on a class." % _script_name(script))
+
+
+func _process_mode_ok(script: GDScript) -> bool:
+	if not AnnotationUtils.has_annotation(script, ProcessMode):
+		return true
+	if not _is_node_script(script):
+		push_error("IOC: %s is @ProcessMode and is not a Node." % _script_name(script))
+		return false
+	return _read_process_mode(script) != null
+
+
+func _read_process_mode(script: GDScript) -> Variant:
+	if script == null or not AnnotationUtils.has_annotation(script, ProcessMode):
+		return null
+	var mark: Variant = AnnotationUtils.get_annotation_initialized(script, ProcessMode)
+	if not (mark is Object):
+		return null
+	var mode := int(mark.get("value"))
+	if mode < Node.PROCESS_MODE_INHERIT or mode > Node.PROCESS_MODE_DISABLED:
+		push_error("IOC: %s @ProcessMode value is not a Node.ProcessMode." % _script_name(script))
+		return null
+	return mode
+
+
+func _apply_process_mode(instance: Object, fallback: int = -1) -> void:
+	if not (instance is Node) or not is_instance_valid(instance):
+		return
+	var node := instance as Node
+	var live := node.get_script() as GDScript
+	var origin := _proxy_origin.get(live, live) as GDScript
+	var mode: Variant = _read_process_mode(origin)
+	if mode != null:
+		node.process_mode = int(mode)
+		return
+	if fallback >= 0:
+		node.process_mode = fallback
 
 
 func _reject_misplaced_primary(script: GDScript) -> void:
@@ -3105,6 +3157,8 @@ func _register_pooled(script: GDScript) -> void:
 		return
 	var packed := _scene_pack(script)
 	if packed == null:
+		return
+	if not _process_mode_ok(script):
 		return
 	_collect_listeners(script, true)
 	_collect_ticks(script, true)
@@ -3340,6 +3394,8 @@ func _register_class_product(script: GDScript) -> void:
 		return
 	var packed := _scene_pack(script)
 	if packed == null:
+		return
+	if not _process_mode_ok(script):
 		return
 	_collect_listeners(script, true)
 	_collect_ticks(script, true)
