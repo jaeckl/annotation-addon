@@ -29,6 +29,7 @@ func _new_game() -> void:
 	if box == null:
 		return
 	var runs := box.resolve(Runs) as Runs
+	var slots := box.resolve(SaveSlots) as SaveSlots
 	if runs == null:
 		return
 	if runs.is_open():
@@ -36,6 +37,8 @@ func _new_game() -> void:
 	if not runs.start():
 		status.text = "Could not start run"
 		return
+	if slots != null:
+		slots.pending_slot = ""
 	# Touch eager run products so Persist write has them.
 	box.resolve(TdWallet)
 	box.resolve(TdTowerField)
@@ -51,11 +54,17 @@ func _continue() -> void:
 	if box == null:
 		return
 	var slots := box.resolve(SaveSlots) as SaveSlots
+	var runs := box.resolve(Runs) as Runs
 	if slots == null or not slots.has("td1"):
 		status.text = "No save in slot td1"
 		return
-	if not slots.load("td1"):
-		status.text = "Load failed"
+	# Load happens in battle with body_parent set so nested @Pooled TdTower
+	# nodes borrow into the world — PersistHook's designed path.
+	slots.pending_slot = "td1"
+	if runs != null and runs.is_open():
+		runs.end()
+	if runs != null and not runs.start():
+		status.text = "Could not start run"
 		return
 	get_tree().paused = false
 	get_tree().change_scene_to_file("res://game/td/battle/battle.tscn")

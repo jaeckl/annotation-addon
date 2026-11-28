@@ -41,7 +41,7 @@ Kill creeps → gold → buy towers → upgrade towers (no sell).
 | `IOCMainLoop` | Boot + discover |
 | `@ConfigurationProperties` | `TdSettings` from `td.cfg` |
 | `@RunScope` / `Runs` | Wallet, towers, waves, match flow, HUD model |
-| `@Persist` / `@Serialize` / `SaveSlots` | Mid-run save; `TdTowerSave` array + `@Required`/`@Optional` + pack/restore hooks |
+| `@Persist` / `@Serialize` / `SaveSlots` | Mid-run save; Continue loads in battle with `body_parent` so nested `@Pooled` `TdTower` rows borrow into the world |
 | `@Pooled` / `@OnRelease` | Creeps, towers, shots |
 | `@Process` | Waves, match flow, HUD sync |
 | `@EventListener` | Kills, leaks, run over |

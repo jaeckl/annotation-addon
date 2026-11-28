@@ -10,11 +10,20 @@ const SLOT_PATTERN := "^[A-Za-z0-9_-]+$"
 
 var root: String = "user://saves"
 var body_parent: Node
+## Set before opening a scene that should call load() with body_parent set
+## (for example battle). take_pending_slot clears it.
+var pending_slot: String = ""
 
 @Inject var mapper: Mapper
 @Inject var runs: Runs
 @Inject var pools: InstancePools
 @Inject var hook: PersistHook
+
+
+func take_pending_slot() -> String:
+	var slot := pending_slot.strip_edges()
+	pending_slot = ""
+	return slot
 
 
 func write(slot: String) -> bool:

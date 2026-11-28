@@ -5,8 +5,8 @@
 class_name TdTowerField
 extends RefCounted
 
-## Owns placed towers and projectiles. Persist stores TdTowerSave rows; live
-## TdTower nodes are packed on write and rebuilt when the battle world binds.
+## Owns placed towers and projectiles. Persist stores the live TdTower array;
+## PersistHook borrows nested @Pooled towers into SaveSlots.body_parent.
 
 @Inject var catalog: TdCatalog
 @Inject var settings: TdSettings
@@ -17,19 +17,18 @@ extends RefCounted
 @Required
 var towers: Array = []
 
-@Transient var live: Array = []
 @Transient var shots: Array = []
 @Transient var selected: TdTower = null
 @Transient var build_kind: StringName = &"arrow"
 @Transient var parent: Node2D
-@Transient var _restored := false
 
 
 func bind_world(world: Node2D) -> void:
 	parent = world
-	if not _restored:
-		_restore_from_save()
-		_restored = true
+	for item in towers:
+		var tower := item as TdTower
+		if tower != null:
+			tower.bind_field(self)
 
 
 func select_build(kind: StringName) -> void:
@@ -60,7 +59,7 @@ func try_build_at(world_pos: Vector2) -> bool:
 		wallet.credit(cost)
 		return false
 	tower.setup(build_kind, 1, cell, spec, self)
-	live.append(tower)
+	towers.append(tower)
 	return true
 
 
@@ -104,7 +103,7 @@ func _upgrade(tower: TdTower) -> bool:
 
 
 func tick(delta: float, creeps: Array) -> void:
-	for item in live:
+	for item in towers:
 		var tower := item as TdTower
 		if tower != null and is_instance_valid(tower):
 			tower.advance(delta, creeps)
@@ -152,44 +151,16 @@ func apply_hit(primary: TdCreep, damage: float, aoe_px: float, slow: float) -> v
 			creep.hurt(damage * 0.6)
 
 
-@OnBeforeSerialization
-func pack_towers() -> void:
-	towers = []
-	for item in live:
-		var tower := item as TdTower
-		if tower == null or not is_instance_valid(tower):
-			continue
-		towers.append(TdTowerSave.from_tower(tower))
-
-
 @OnAfterDeserialization
-func note_loaded() -> void:
-	# Live nodes need the battle parent; bind_world spawns from `towers`.
-	_restored = false
-	live = []
-
-
-func _restore_from_save() -> void:
-	if parent == null or pools == null or catalog == null or settings == null:
-		return
-	live = []
+func wire_loaded_towers() -> void:
 	for item in towers:
-		var row := item as TdTowerSave
-		if row == null:
-			continue
-		var kind := StringName(row.kind)
-		var spec := catalog.tower(kind)
-		if spec.is_empty():
-			continue
-		var tower := pools.borrow(TdTower, parent) as TdTower
-		if tower == null:
-			continue
-		tower.setup(kind, row.level, row.cell, spec, self)
-		live.append(tower)
+		var tower := item as TdTower
+		if tower != null:
+			tower.bind_field(self)
 
 
 func _occupied(cell: Vector2i) -> bool:
-	for item in live:
+	for item in towers:
 		var tower := item as TdTower
 		if tower != null and tower.cell == cell:
 			return true
@@ -198,7 +169,7 @@ func _occupied(cell: Vector2i) -> bool:
 
 func _at_world(pos: Vector2) -> TdTower:
 	var hit := settings.select_hit_radius if settings != null else 18.0
-	for item in live:
+	for item in towers:
 		var tower := item as TdTower
 		if tower == null:
 			continue

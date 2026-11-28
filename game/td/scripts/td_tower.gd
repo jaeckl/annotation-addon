@@ -3,17 +3,26 @@
 class_name TdTower
 extends Node2D
 
-## Placed tower. kind + level set on borrow; fire uses catalog cooldown.
+## Placed tower. Persist marks kind/level/cell; runtime stays @Transient.
+## Nested under TdTowerField.towers — PersistHook borrows into battle body_parent.
 
 @Inject var settings: TdSettings
+@Inject var catalog: TdCatalog
 
+@Serialize
+@Required
 var kind: StringName = &"arrow"
+@Serialize
+@Required
 var level: int = 1
+@Serialize
+@Required
 var cell: Vector2i = Vector2i.ZERO
-var selected := false
-var _cooldown_left: float = 0.0
-var spec: Dictionary = {}
-var _field: TdTowerField
+
+@Transient var selected := false
+@Transient var _cooldown_left: float = 0.0
+@Transient var spec: Dictionary = {}
+@Transient var _field: TdTowerField
 
 
 func setup(k: StringName, lvl: int, at: Vector2i, tower_spec: Dictionary, field: TdTowerField) -> void:
@@ -24,12 +33,33 @@ func setup(k: StringName, lvl: int, at: Vector2i, tower_spec: Dictionary, field:
 	_field = field
 	_cooldown_left = 0.0
 	selected = false
+	_apply_pose(true)
+
+
+@OnAfterDeserialization
+func hydrate() -> void:
+	level = clampi(level, 1, 3)
+	if catalog != null:
+		spec = catalog.tower(kind)
+	_cooldown_left = 0.0
+	selected = false
+	_apply_pose(false)
+
+
+func bind_field(field: TdTowerField) -> void:
+	_field = field
+
+
+func _apply_pose(animate: bool) -> void:
 	position = TdPath.cell_to_world(cell, _cell())
-	scale = Vector2(0.2, 0.2)
 	modulate = Color(1, 1, 1, 1)
 	show()
 	queue_redraw()
-	pop_in()
+	if animate:
+		scale = Vector2(0.2, 0.2)
+		pop_in()
+	else:
+		scale = Vector2.ONE * (0.85 + 0.1 * float(level))
 
 
 @TweenPlay(props = { "scale": Vector2(1, 1) }, duration = 0.18)

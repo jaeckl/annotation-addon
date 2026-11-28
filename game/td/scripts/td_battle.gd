@@ -2,6 +2,8 @@ extends Node2D
 
 ## Battle world + pause/end overlays. HUD is TdHudView (MVC). Esc pause lives
 ## here with PROCESS_MODE_ALWAYS so it still works while the tree is paused.
+## Continue loads the save here with SaveSlots.body_parent = self so nested
+## @Pooled towers borrow into this world.
 
 @Inject var settings: TdSettings
 @Inject var waves: TdWaveDirector
@@ -19,12 +21,16 @@ extends Node2D
 func _ready() -> void:
 	# Keep Esc / overlays alive while MatchFlow pauses the tree.
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	if not _boot_run():
+		return
 	if towers != null:
 		towers.bind_world(self)
 	if waves != null:
 		waves.bind_world(self)
 	if battle_input != null:
 		battle_input.bind_world(self)
+	if hud != null:
+		hud.arm()
 
 	pause_panel.visible = false
 	end_panel.visible = false
@@ -33,6 +39,32 @@ func _ready() -> void:
 	$CanvasLayer/Pause/Menu.pressed.connect(_to_menu)
 	$CanvasLayer/End/Menu.pressed.connect(_to_menu)
 	queue_redraw()
+
+
+func _boot_run() -> bool:
+	var box := _box()
+	if box == null or slots == null:
+		return false
+	slots.body_parent = self
+	var pending := slots.take_pending_slot()
+	if not pending.is_empty():
+		if not slots.load(pending):
+			push_error("TD: could not load slot %s." % pending)
+			get_tree().change_scene_to_file("res://game/td/td_main.tscn")
+			return false
+		# load() replaced the run — refresh run-scoped injects on this node.
+		waves = box.resolve(TdWaveDirector) as TdWaveDirector
+		towers = box.resolve(TdTowerField) as TdTowerField
+		flow = box.resolve(TdMatchFlow) as TdMatchFlow
+		runs = box.resolve(Runs) as Runs
+	return true
+
+
+func _box() -> IOCContainer:
+	var loop := Engine.get_main_loop() as IOCMainLoop
+	if loop == null:
+		return null
+	return loop.container
 
 
 func _process(delta: float) -> void:
