@@ -18,6 +18,8 @@ var _mark_bad: Dictionary = {}
 var _plan_reported: Dictionary = {}
 var _empty_reported: Dictionary = {}
 var _scripts: Dictionary = {}
+static var _advisors_ready := false
+static var _advisor_list: Array = []
 
 
 func write(instance: Object) -> PackedByteArray:
@@ -131,7 +133,12 @@ func _write_object(instance: Object, stack: Dictionary, force_all: bool) -> Dict
 	var nested_force := force_all or _class_mode(script)
 	var document := {"_type": String(script.get_global_name())}
 	for field in fields:
-		document[String(field["key"])] = _write_value(instance.get(String(field["name"])), stack, nested_force)
+		var prop_name := String(field["name"])
+		var advised: Variant = _advise_field(instance, StringName(prop_name), instance.get(prop_name))
+		if _failed:
+			stack.erase(id)
+			return {}
+		document[String(field["key"])] = _write_value(advised, stack, nested_force)
 		if _failed:
 			stack.erase(id)
 			return {}
@@ -244,7 +251,11 @@ func _fill_object(instance: Object, document: Dictionary, script: GDScript) -> b
 		var coerced: Variant = _coerce(int(by_key[key_text]["type"]), decoded)
 		if _failed:
 			return false
-		instance.set(String(by_key[key_text]["name"]), coerced)
+		var prop_name := String(by_key[key_text]["name"])
+		var advised: Variant = _advise_field(instance, StringName(prop_name), coerced)
+		if _failed:
+			return false
+		instance.set(prop_name, advised)
 	return not _failed
 
 
@@ -508,6 +519,88 @@ func _script_name(script: GDScript) -> String:
 	if global_name.is_empty():
 		return script.resource_path.get_file()
 	return global_name
+
+
+func _advise_field(owner: Object, property: StringName, value: Variant) -> Variant:
+	var next: Variant = value
+	for step in _steps():
+		var result: Variant = (step as FieldAdvisor).advise(owner, property, next)
+		if not (result is Dictionary):
+			_error("Serialize: %s.%s advisor %s returned no result." % [_owner_name(owner), String(property), _advisor_name(step)])
+			return null
+		var outcome: Dictionary = result
+		if not bool(outcome.get("ok", false)):
+			var message := String(outcome.get("message", "")).strip_edges()
+			if message.is_empty():
+				message = "rejected by %s" % _advisor_name(step)
+			_error("Serialize: %s.%s %s." % [_owner_name(owner), String(property), message])
+			return null
+		next = outcome.get("value", next)
+	return next
+
+
+func _steps() -> Array:
+	if _advisors_ready:
+		return _advisor_list
+	_advisors_ready = true
+	var bases := {}
+	var entries: Array = ProjectSettings.get_global_class_list()
+	for entry in entries:
+		bases[String(entry.get("class", ""))] = String(entry.get("base", ""))
+	for entry in entries:
+		var listed := String(entry.get("class", ""))
+		if listed.is_empty() or listed == "FieldAdvisor":
+			continue
+		if String(entry.get("language", "")) != "GDScript":
+			continue
+		if not _is_advisor(listed, bases):
+			continue
+		var script := load(String(entry.get("path", ""))) as GDScript
+		if script == null:
+			continue
+		var advisor: Object = script.new()
+		if advisor is FieldAdvisor:
+			_advisor_list.append(advisor)
+	_advisor_list.sort_custom(func(a: Object, b: Object) -> bool: return _step_before(a, b))
+	return _advisor_list
+
+
+func _is_advisor(listed: String, bases: Dictionary) -> bool:
+	var seen := {}
+	var current := String(bases.get(listed, ""))
+	while not current.is_empty() and not seen.has(current):
+		if current == "FieldAdvisor":
+			return true
+		seen[current] = true
+		current = String(bases.get(current, ""))
+	return false
+
+
+func _step_before(a: Object, b: Object) -> bool:
+	var left := int(a.get("order")) if a is FieldAdvisor else 0
+	var right := int(b.get("order")) if b is FieldAdvisor else 0
+	if left == right:
+		return _advisor_name(a) < _advisor_name(b)
+	return left < right
+
+
+func _advisor_name(step: Object) -> String:
+	var script := step.get_script() as GDScript
+	while script != null:
+		var global_name := script.get_global_name()
+		if global_name != &"":
+			return String(global_name)
+		script = script.get_base_script()
+	return "FieldAdvisor"
+
+
+func _owner_name(owner: Object) -> String:
+	if owner == null:
+		return "?"
+	var script := owner.get_script() as GDScript
+	if script != null:
+		return _script_name(script)
+	return owner.get_class()
 
 
 func _error(message: String) -> void:
