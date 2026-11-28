@@ -6,17 +6,29 @@ extends RefCounted
 
 @Serialize var count: int = 0
 @Transient var live: int = 0
-var before_runs := 0
-var after_runs := 0
+@Transient var before_write_runs := 0
+@Transient var after_write_runs := 0
+@Transient var before_read_runs := 0
+@Transient var after_read_runs := 0
 
 
 @OnBeforeSerialization
 func pack_live() -> void:
-	before_runs += 1
+	before_write_runs += 1
 	count = live
+
+
+@OnAfterSerialization
+func note_after_write() -> void:
+	after_write_runs += 1
+
+
+@OnBeforeDeserialization
+func note_before_read() -> void:
+	before_read_runs += 1
 
 
 @OnAfterDeserialization
 func unpack_live() -> void:
-	after_runs += 1
+	after_read_runs += 1
 	live = count
