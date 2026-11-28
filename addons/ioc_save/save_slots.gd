@@ -10,8 +10,8 @@ const SLOT_PATTERN := "^[A-Za-z0-9_-]+$"
 
 var root: String = "user://saves"
 var body_parent: Node
-## Set before opening a scene that should call load() with body_parent set
-## (for example battle). take_pending_slot clears it.
+## Set before changing to a play scene. SaveContinueHook loads it on scene
+## open with body_parent = that scene root, before @SceneScoped products build.
 var pending_slot: String = ""
 
 @Inject var mapper: Mapper
@@ -24,6 +24,21 @@ func take_pending_slot() -> String:
 	var slot := pending_slot.strip_edges()
 	pending_slot = ""
 	return slot
+
+
+## Called when a scene opens. If pending_slot is set, loads that slot into a
+## new run with nested @Pooled bodies parented under root. Clears pending.
+func apply_pending_for_scene(root: Node) -> bool:
+	var slot := take_pending_slot()
+	if slot.is_empty():
+		return true
+	if root == null or not is_instance_valid(root):
+		push_error("Save: pending slot %s needs a scene root." % slot)
+		return false
+	body_parent = root
+	var ok := self.load(slot)
+	body_parent = null
+	return ok
 
 
 func write(slot: String) -> bool:

@@ -419,6 +419,8 @@ func _open_scene(root: Node) -> void:
 		return
 	var bucket: Array = []
 	scene_scope.open(root)
+	# Pending save continue runs here so @SceneScoped injects see the loaded run.
+	_hook_before_scene_open(root)
 	_scene_definitions[scene_id] = bucket
 	_active_scene_id = scene_id
 	_active_scene_root = root
@@ -3883,6 +3885,11 @@ func _resolve_hooks() -> void:
 func _hook_before_ready(instance: Object) -> void:
 	for hook in _hooks:
 		(hook as ContainerHook).before_ready(instance)
+
+
+func _hook_before_scene_open(root: Node) -> void:
+	for hook in _hooks:
+		(hook as ContainerHook).before_scene_open(root)
 
 
 func _install_properties(script: GDScript, chains: Dictionary) -> bool:
