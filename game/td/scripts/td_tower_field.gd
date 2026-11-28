@@ -23,6 +23,11 @@ var towers: Array = []
 @Transient var parent: Node2D
 
 
+@OnSceneEnter
+func on_battle(root: TdBattle) -> void:
+	bind_world(root)
+
+
 func bind_world(world: Node2D) -> void:
 	parent = world
 	for item in towers:

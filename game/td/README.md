@@ -42,13 +42,15 @@ Kill creeps → gold → buy towers → upgrade towers (no sell).
 | `@ConfigurationProperties` | `TdSettings` from `td.cfg` |
 | `@RunScope` / `Runs` | Wallet, towers, waves, match flow, HUD model |
 | `@Persist` / `@Serialize` / `SaveSlots` | Mid-run save; Continue sets `pending_slot`, `SaveContinueHook` loads on battle open before `@SceneScoped` (nested `@Pooled` `TdTower` via `body_parent`) |
+| `@OnSceneEnter` | Run products bind the `TdBattle` root (pool parent / mouse space) — no manual `bind_world` from the scene |
 | `@Pooled` / `@OnRelease` | Creeps, towers, shots |
 | `@Process` | Waves, match flow, HUD sync |
 | `@EventListener` | Kills, leaks, run over |
 | FSM (`@StateMachine`, `@OnEnter`) | `TdMatchFlow` |
 | MVC (`@Model` / `@View` / `@Controller` / `@Bind` / `@Property`) | HUD |
 | `@UnhandledInput` + `@OncePer` | Play clicks / hotkeys |
+| `@ProcessMode(ALWAYS)` | `TdPauseInput` Esc while tree paused |
 | `@TweenPlay` | Tower place pop |
 | `@Logged` / `@Timed` | Wave finish / creep move hotspot |
-| `@Inject` / `@SceneScoped` / `@Eager` | Battle wiring |
+| `@Inject` / `@SceneScoped` / `@Eager` / `@Ready` | Menu + battle wiring (painted nodes take `@Inject`; HUD arms in `@Ready`) |
 | Catalog cooldown | Per-tower fire (data-driven; not a fixed `@Cooldown` string) |

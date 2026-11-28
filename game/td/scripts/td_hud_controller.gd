@@ -4,11 +4,14 @@
 class_name TdHudController
 extends RefCounted
 
-## Binds TdHudModel to TdHudView and routes HUD buttons. Battle calls arm()
-## after optional save load so run-scoped model/wallet refs stay current.
+## Binds TdHudModel to TdHudView and routes HUD buttons. SaveContinueHook
+## loads before @SceneScoped build, so @Inject run deps are already fresh.
 
 @Inject var view: TdHudView
-@Inject var runs: Runs
+@Inject var model: TdHudModel
+@Inject var wallet: TdWallet
+@Inject var waves: TdWaveDirector
+@Inject var towers: TdTowerField
 @Inject var catalog: TdCatalog
 @Inject var screens: ScreenHost
 
@@ -21,27 +24,9 @@ extends RefCounted
 @Bind var cannon_button: Button
 @Bind var slow_button: Button
 
-var model: TdHudModel
-var wallet: TdWallet
-var waves: TdWaveDirector
-var towers: TdTowerField
-var _armed := false
 
-
-func refresh_run() -> void:
-	if runs == null:
-		return
-	model = runs.resolve(TdHudModel) as TdHudModel
-	wallet = runs.resolve(TdWallet) as TdWallet
-	waves = runs.resolve(TdWaveDirector) as TdWaveDirector
-	towers = runs.resolve(TdTowerField) as TdTowerField
-
-
+@Ready
 func arm() -> void:
-	refresh_run()
-	if _armed or model == null:
-		return
-	_armed = true
 	_sync()
 	Bindings.link(Bindings.text(gold_label), model.gold_text)
 	Bindings.link(Bindings.text(lives_label), model.lives_text)
@@ -56,12 +41,12 @@ func arm() -> void:
 
 @Process
 func tick(_delta: float) -> void:
-	if not _armed:
-		return
 	_sync()
 
 
 func _sync() -> void:
+	if model == null:
+		return
 	if wallet != null:
 		model.gold_text = "Gold: %d" % wallet.gold
 		model.lives_text = "Lives: %d" % wallet.lives

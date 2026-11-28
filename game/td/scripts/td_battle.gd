@@ -1,9 +1,9 @@
+class_name TdBattle
 extends Node2D
 
-## Battle world + pause/end overlays. HUD is TdHudView (MVC). Esc pause lives
-## here with PROCESS_MODE_ALWAYS so it still works while the tree is paused.
-## Continue: SaveContinueHook already loaded pending_slot before this node's
-## @Inject fields filled, with body_parent = this root for nested @Pooled towers.
+## Battle world + pause/end overlays. HUD is TdHudView (MVC).
+## Run products bind this root via @OnSceneEnter(TdBattle).
+## Esc lives on TdPauseInput (@ProcessMode ALWAYS) so play input stays pausable.
 
 @Inject var settings: TdSettings
 @Inject var waves: TdWaveDirector
@@ -13,23 +13,15 @@ extends Node2D
 @Inject var runs: Runs
 @Inject var battle_input: TdBattleInput
 @Inject var hud: TdHudController
+@Inject var pause_input: TdPauseInput
 
 @onready var pause_panel: Control = $CanvasLayer/Pause
 @onready var end_panel: Control = $CanvasLayer/End
 
 
 func _ready() -> void:
-	# Keep Esc / overlays alive while MatchFlow pauses the tree.
+	# Overlays + redraw while MatchFlow pauses the tree. Esc is TdPauseInput.
 	process_mode = Node.PROCESS_MODE_ALWAYS
-	if towers != null:
-		towers.bind_world(self)
-	if waves != null:
-		waves.bind_world(self)
-	if battle_input != null:
-		battle_input.bind_world(self)
-	if hud != null:
-		hud.arm()
-
 	pause_panel.visible = false
 	end_panel.visible = false
 	$CanvasLayer/Pause/Resume.pressed.connect(_resume)
@@ -48,17 +40,6 @@ func _process(delta: float) -> void:
 			towers.tick(delta, waves.creeps)
 	_refresh_panels()
 	queue_redraw()
-
-
-func _unhandled_input(event: InputEvent) -> void:
-	# @UnhandledInput products are skipped while the tree is paused, so Esc
-	# must stay on this ALWAYS node.
-	if flow == null:
-		return
-	if event.is_action_pressed("ui_cancel"):
-		if flow.state == TdMatchFlow.Phase.PLAYING or flow.state == TdMatchFlow.Phase.PAUSED:
-			flow.toggle_pause()
-		get_viewport().set_input_as_handled()
 
 
 func _resume() -> void:

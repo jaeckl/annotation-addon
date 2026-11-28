@@ -1,9 +1,10 @@
-@SceneScoped
+@RunScope
+@Eager
 @Component
 class_name TdBattleInput
 extends RefCounted
 
-## Play-time clicks and hotkeys. Esc pause stays on the battle node so it
+## Play-time clicks and hotkeys. Esc pause is TdPauseInput (ALWAYS) so it
 ## still works while the tree is paused (@UnhandledInput is skipped then).
 
 @Inject var flow: TdMatchFlow
@@ -12,7 +13,8 @@ extends RefCounted
 var world: Node2D
 
 
-func bind_world(root: Node2D) -> void:
+@OnSceneEnter
+func on_battle(root: TdBattle) -> void:
 	world = root
 
 

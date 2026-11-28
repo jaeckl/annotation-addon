@@ -49,6 +49,11 @@ func mark_loaded() -> void:
 	_between_cd = 0.0 if active else (settings.wave_gap_seconds if settings != null else 3.0)
 
 
+@OnSceneEnter
+func on_battle(root: TdBattle) -> void:
+	bind_world(root)
+
+
 func bind_world(world: Node2D) -> void:
 	parent = world
 	if _started:
